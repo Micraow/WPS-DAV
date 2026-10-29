@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish_aur:
+        description: "Publish an existing release to AUR (version, e.g. 0.1.3)"
+        required: false
 
 permissions:
   contents: write
@@ -12,6 +16,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -110,3 +115,95 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.zip
             artifacts/checksums-sha256.txt
+
+  aur:
+    name: Publish to AUR
+    needs: [build, release]
+    if: |
+      (startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && needs.release.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_aur != '')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version and checksum
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.publish_aur }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          [ -n "${VERSION}" ] || { echo "no version resolved"; exit 1; }
+
+          URL="https://github.com/Micraow/WPS-DAV/releases/download/v${VERSION}/checksums-sha256.txt"
+          SUM="$(curl -fsSL "${URL}" | awk -v n="wpsdav_${VERSION}_linux_amd64.tar.gz" '$2 == n { print $1 }')"
+          [ -n "${SUM}" ] || { echo "checksum for v${VERSION} not found in ${URL}"; exit 1; }
+
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "SUM=${SUM}" >> "${GITHUB_ENV}"
+          echo "publishing wpsdav-bin ${VERSION} (${SUM})"
+
+      - name: Update AUR metadata
+        run: |
+          set -euo pipefail
+          PKG=packaging/aur/wpsdav-bin/PKGBUILD
+          SRC=packaging/aur/wpsdav-bin/.SRCINFO
+
+          sed -i -E "s/^pkgver=.*/pkgver=${VERSION}/" "${PKG}"
+          sed -i -E "s/^sha256sums=\('.*'\)/sha256sums=('${SUM}')/" "${PKG}"
+          sed -i -E "s/^\tpkgver = .*/\tpkgver = ${VERSION}/" "${SRC}"
+          sed -i -E "s#^\tsource = .*#\tsource = wpsdav-${VERSION}.tar.gz::https://github.com/Micraow/WPS-DAV/releases/download/v${VERSION}/wpsdav_${VERSION}_linux_amd64.tar.gz#" "${SRC}"
+          sed -i -E "s/^\tsha256sums = .*/\tsha256sums = ${SUM}/" "${SRC}"
+
+          grep -E '^pkgver|^sha256sums' "${PKG}"
+          grep -E 'pkgver|source|sha256sums' "${SRC}"
+
+      - name: Set up AUR SSH key
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${AUR_SSH_KEY}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Push to AUR
+        run: |
+          set -euo pipefail
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          rm -rf /tmp/aur
+          git clone ssh://aur@aur.archlinux.org/wpsdav-bin.git /tmp/aur
+          cp packaging/aur/wpsdav-bin/PKGBUILD packaging/aur/wpsdav-bin/.SRCINFO /tmp/aur/
+          cd /tmp/aur
+          git config user.name "wpsdav release bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already up to date"
+            exit 0
+          fi
+          git commit -m "wpsdav-bin ${VERSION}"
+          git push origin master
+
+      - name: Sync AUR metadata to main
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git config user.name "wpsdav release bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git checkout -- packaging/aur/wpsdav-bin/ || true
+          git fetch origin main
+          git checkout -B main origin/main
+          cp /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO packaging/aur/wpsdav-bin/
+          git add packaging/aur/wpsdav-bin/PKGBUILD packaging/aur/wpsdav-bin/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "main already up to date"
+            exit 0
+          fi
+          git commit -m "aur: wpsdav-bin ${VERSION}"
+          git push origin main
