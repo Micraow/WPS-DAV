@@ -60,6 +60,7 @@ jobs:
             -o "dist/${BIN}" .
 
           cp README.md LICENSE config.example.json dist/
+          cp packaging/systemd/wpsdav.service dist/
           cd dist
 
           NAME="wpsdav_${VERSION}_${GOOS}_${GOARCH}"

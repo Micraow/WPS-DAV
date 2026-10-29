@@ -19,4 +19,8 @@ package() {
   install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 "${srcdir}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 "${srcdir}/config.example.json" "${pkgdir}/usr/share/doc/${pkgname}/config.example.json"
+  # systemd --user unit (present in release archives from 0.1.1 on)
+  if [ -f "${srcdir}/wpsdav.service" ]; then
+    install -Dm644 "${srcdir}/wpsdav.service" "${pkgdir}/usr/lib/systemd/user/wpsdav.service"
+  fi
 }

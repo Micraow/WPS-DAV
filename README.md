@@ -50,14 +50,25 @@ git clone https://github.com/Micraow/WPS-DAV.git && cd WPS-DAV
 go build -o wpsdav .
 ```
 
-### 2. 配置
+### 2. 初始化
 
 ```bash
-cp config.example.json wpsdav.json
+wpsdav init
+# 生成 ~/.config/wpsdav/config.json（0600）和随机 WebDAV 密码
 ```
 
-至少修改 `username` 和 `password`（WebDAV 端点的登录凭据）。程序默认读取当前目录的
-`wpsdav.json`，所以日常启动不需要任何参数。
+`init` 会打印生成的用户名和密码，并把 Cookie 文件放到
+`~/.local/state/wpsdav/cookie.txt`。需要系统级配置时用
+`sudo wpsdav init --system`（写入 `/etc/wpsdav/config.json`）。
+
+配置查找顺序（第一个匹配生效）：
+
+```
+--config PATH  >  $WPSDAV_CONFIG  >  ./wpsdav.json  >  ./config.json
+               >  ~/.config/wpsdav/config.json  >  /etc/wpsdav/config.json
+```
+
+启动时会打印实际加载的配置文件路径，避免“不知道用的哪份配置”。
 
 ### 3. 导入 Cookie
 
@@ -205,7 +216,7 @@ wpsdav cookie
 | `listen` | `127.0.0.1:8705` | HTTP 监听地址 |
 | `dav_path` | `/dav` | WebDAV 挂载路径 |
 | `username` / `password` | — | WebDAV 端点的 Basic Auth 凭据（必填） |
-| `cookie_file` | `cookie.txt` | Cookie 缓存文件 |
+| `cookie_file` | XDG state 目录 | Cookie 缓存文件；用户配置默认 `~/.local/state/wpsdav/cookie.txt`，`/etc` 配置默认 `/var/lib/wpsdav/cookie.txt` |
 | `auth.mode` | `cookie` | `cookie` 或 `buaa` |
 | `auth.sso.username` / `password` | — | SSO 账号（也可用环境变量，见下） |
 | `auth.sso.entry_url` | `https://wps.buaa.edu.cn/` | SSO 入口 |
@@ -227,7 +238,8 @@ export WPSDAV_SSO_PASSWORD=密码
 ## 🧰 命令
 
 ```text
-wpsdav serve     启动 WebDAV / 控制服务（默认读取 ./wpsdav.json）
+wpsdav init      生成配置文件与随机 WebDAV 密码
+wpsdav serve     启动 WebDAV / 控制服务
 wpsdav doctor    只读自检：登录态、云盘列表、目录读取、下载直链
 wpsdav groups    列出当前账号可见的全部分组和团队文档
 wpsdav cookie    安装浏览器 Cookie（参数或 stdin）
@@ -244,6 +256,7 @@ wpsdav version   查看版本信息
 - 刷新缓存：`curl -u user:pass -X POST http://127.0.0.1:8705/admin/refresh`
 - 更新 Cookie：直接覆盖 `cookie.txt`，或
   `curl -u user:pass -X PUT --data-binary @cookie.txt http://127.0.0.1:8705/admin/cookie`
+- 用户级服务：安装包（0.1.1+）自带 systemd 用户单元，`systemctl --user enable --now wpsdav` 即可开机自启（配置需先用 `wpsdav init` 生成）。
 - 远程部署：监听 `0.0.0.0` 时请置于 TLS 反向代理之后，Cookie 等价于完整账号权限。
 
 ## ❗ 已知限制

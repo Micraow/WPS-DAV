@@ -1,0 +1,14 @@
+[Unit]
+Description=WPS/Kdocs cloud drive as WebDAV (wpsdav)
+Documentation=https://github.com/Micraow/WPS-DAV
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wpsdav serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

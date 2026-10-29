@@ -101,7 +101,6 @@ func Default() *Config {
 		Mode:            ModePersonal,
 		Listen:          "127.0.0.1:8705",
 		DAVPath:         "/dav",
-		CookieFile:      "cookie.txt",
 		DownloadMode:    DownloadRedirect,
 		CacheTTLSeconds: 60,
 		Auth: AuthConfig{
@@ -114,6 +113,37 @@ func Default() *Config {
 	}
 }
 
+// SearchPaths lists config file candidates in priority order (after the
+// explicit --config flag and WPSDAV_CONFIG environment variable).
+func SearchPaths() []string {
+	paths := []string{"wpsdav.json", "config.json"}
+	paths = append(paths, filepath.Join(UserConfigDir(), "wpsdav", "config.json"))
+	paths = append(paths, "/etc/wpsdav/config.json")
+	return paths
+}
+
+// UserConfigDir returns $XDG_CONFIG_HOME or ~/.config.
+func UserConfigDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config")
+	}
+	return "."
+}
+
+// UserStateDir returns $XDG_STATE_HOME or ~/.local/state.
+func UserStateDir() string {
+	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "state")
+	}
+	return "."
+}
+
 // Load reads the JSON config at path, applying defaults for missing fields.
 func Load(path string) (*Config, error) {
 	cfg := Default()
@@ -124,18 +154,32 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.resolvePaths(path)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	// Relative paths in the config are resolved against the config file's
-	// directory, so `--config /path/to/wpsdav.json` works from anywhere.
-	if !filepath.IsAbs(cfg.CookieFile) {
-		cfg.CookieFile = filepath.Join(filepath.Dir(path), cfg.CookieFile)
-	}
-	if cfg.SpoolDir != "" && !filepath.IsAbs(cfg.SpoolDir) {
-		cfg.SpoolDir = filepath.Join(filepath.Dir(path), cfg.SpoolDir)
-	}
 	return cfg, nil
+}
+
+// resolvePaths fills defaults and resolves relative paths against the config
+// file's directory. Without an explicit cookie_file, a user config stores
+// state under XDG_STATE_HOME and a system config under /var/lib/wpsdav.
+func (c *Config) resolvePaths(configPath string) {
+	dir := filepath.Dir(configPath)
+	system := filepath.Clean(dir) == "/etc/wpsdav"
+	if c.CookieFile == "" {
+		switch {
+		case system:
+			c.CookieFile = "/var/lib/wpsdav/cookie.txt"
+		default:
+			c.CookieFile = filepath.Join(UserStateDir(), "wpsdav", "cookie.txt")
+		}
+	} else if !filepath.IsAbs(c.CookieFile) {
+		c.CookieFile = filepath.Join(dir, c.CookieFile)
+	}
+	if c.SpoolDir != "" && !filepath.IsAbs(c.SpoolDir) {
+		c.SpoolDir = filepath.Join(dir, c.SpoolDir)
+	}
 }
 
 // Validate checks the configuration for inconsistencies.

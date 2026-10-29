@@ -9,3 +9,4 @@ packaging/aur/*/src/
 packaging/aur/*/pkg/
 dist/
 packaging/aur/*/*.tar.gz
+cookie*.txt

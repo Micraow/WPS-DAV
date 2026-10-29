@@ -4,13 +4,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -39,6 +43,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "init":
+		cmdInit(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	case "doctor":
@@ -64,20 +70,24 @@ func usage() {
 	fmt.Fprint(os.Stderr, `wpsdav - WPS cloud drive as WebDAV for rclone
 
 usage:
-  wpsdav serve     run the WebDAV/control server (config: ./wpsdav.json)
+  wpsdav init      create a config file with a generated password
+  wpsdav serve     run the WebDAV/control server
   wpsdav doctor    check credentials, listing, and download-URL behavior
   wpsdav groups    list drives (groups) visible to the account
   wpsdav cookie    install a cookie from an argument or stdin
   wpsdav login     [--provider buaa] [学号]  log in through an auth provider
   wpsdav version   print version information
 
-Config discovery: ./wpsdav.json, then ./config.json (override with -c or
-`+envConfigFile+`). SSO credentials fall back to WPSDAV_SSO_USERNAME /
-WPSDAV_SSO_PASSWORD.
+Config discovery (first match wins):
+  --config PATH, $WPSDAV_CONFIG, ./wpsdav.json, ./config.json,
+  ~/.config/wpsdav/config.json, /etc/wpsdav/config.json
+
+Run "wpsdav init" to create a user config with a generated password.
+SSO credentials fall back to WPSDAV_SSO_USERNAME / WPSDAV_SSO_PASSWORD.
 `)
 }
 
-// configPath resolves the config file: -c, env, then the current directory.
+// configPath resolves the config file: flag, env, then standard locations.
 func configPath(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -85,7 +95,7 @@ func configPath(flagValue string) string {
 	if v := os.Getenv(envConfigFile); v != "" {
 		return v
 	}
-	for _, p := range []string{"wpsdav.json", "config.json"} {
+	for _, p := range config.SearchPaths() {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -94,16 +104,19 @@ func configPath(flagValue string) string {
 }
 
 func loadConfig(fs *pflag.FlagSet) *config.Config {
-	path := fs.StringP("config", "c", "", "config file (default: ./wpsdav.json or ./config.json)")
+	path := fs.StringP("config", "c", "", "config file (default: search standard locations)")
 	_ = fs.Parse(os.Args[2:])
 	cfgFile := configPath(*path)
 	if cfgFile == "" {
-		log.Fatalf("no config found: create ./wpsdav.json or pass -c (searched ./wpsdav.json, ./config.json)")
+		searched := append([]string{"$" + envConfigFile}, config.SearchPaths()...)
+		log.Fatalf("no config found (searched: %s)\n  create one with `wpsdav init`, or pass --config PATH",
+			strings.Join(searched, ", "))
 	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		log.Fatalf("config %s: %v", cfgFile, err)
 	}
+	log.Printf("config: %s", cfgFile)
 	return cfg
 }
 
@@ -198,6 +211,80 @@ func superviseCredentials(ctx context.Context, cfg *config.Config, prov auth.Pro
 		tree.ForcedRefresh()
 		log.Printf("credentials renewed via %s", prov.Name())
 	}
+}
+
+// cmdInit writes a ready-to-edit config with a generated WebDAV password.
+func cmdInit(args []string) {
+	fs := pflag.NewFlagSet("init", pflag.ExitOnError)
+	system := fs.Bool("system", false, "write /etc/wpsdav/config.json (requires root)")
+	buaa := fs.Bool("buaa", false, "select the BUAA SSO provider")
+	force := fs.Bool("force", false, "overwrite an existing config")
+	listen := fs.String("listen", "127.0.0.1:8705", "listen address")
+	_ = fs.Parse(os.Args[2:])
+
+	var cfgPath, cookiePath string
+	if *system {
+		if os.Geteuid() != 0 {
+			log.Fatalf("--system requires root")
+		}
+		cfgPath = "/etc/wpsdav/config.json"
+		cookiePath = "/var/lib/wpsdav/cookie.txt"
+	} else {
+		cfgPath = filepath.Join(config.UserConfigDir(), "wpsdav", "config.json")
+		cookiePath = filepath.Join(config.UserStateDir(), "wpsdav", "cookie.txt")
+	}
+	if _, err := os.Stat(cfgPath); err == nil && !*force {
+		log.Fatalf("%s already exists (use --force to overwrite)", cfgPath)
+	}
+
+	password, err := randomPassword(20)
+	if err != nil {
+		log.Fatalf("generate password: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Listen = *listen
+	cfg.Username = "wpsdav"
+	cfg.Password = password
+	cfg.CookieFile = cookiePath
+	if *buaa {
+		cfg.Auth.Mode = "buaa"
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Fatalf("encode config: %v", err)
+	}
+	for _, dir := range []string{filepath.Dir(cfgPath), filepath.Dir(cookiePath)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o600); err != nil {
+		log.Fatalf("write %s: %v", cfgPath, err)
+	}
+
+	fmt.Printf(`config written: %s (0600)
+cookie file:    %s
+WebDAV user:    %s
+WebDAV pass:    %s
+
+next steps:
+  1. wpsdav login --provider buaa 学号   # 或 wpsdav cookie
+  2. wpsdav doctor
+  3. wpsdav serve
+`, cfgPath, cookiePath, cfg.Username, password)
+}
+
+func randomPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	out := make([]byte, n)
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		out[i] = alphabet[idx.Int64()]
+	}
+	return string(out), nil
 }
 
 func cmdServe(args []string) {

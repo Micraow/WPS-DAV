@@ -57,3 +57,5 @@ Subsequent updates reuse the same clone: edit `PKGBUILD`, regenerate
 - The release tarball ships `LICENSE`, which is installed to
   `/usr/share/licenses/wpsdav-bin/`.
 - Users can install with any AUR helper, e.g. `yay -S wpsdav-bin`.
+- Release archives from 0.1.1 on ship `wpsdav.service`; the PKGBUILD installs it
+  to `/usr/lib/systemd/user/` when present.

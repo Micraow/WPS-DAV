@@ -4,7 +4,7 @@
   "dav_path": "/dav",
   "username": "wpsdav",
   "password": "change-me",
-  "cookie_file": "cookie.txt",
+  "cookie_file": "",
   "auth": {
     "mode": "cookie",
     "sso": {
