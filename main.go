@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,9 @@ import (
 )
 
 const envConfigFile = "WPSDAV_CONFIG"
+
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -45,6 +49,8 @@ func main() {
 		cmdCookie(os.Args[2:])
 	case "login":
 		cmdLogin(os.Args[2:])
+	case "version", "--version":
+		fmt.Printf("wpsdav %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -63,6 +69,7 @@ usage:
   wpsdav groups    list drives (groups) visible to the account
   wpsdav cookie    install a cookie from an argument or stdin
   wpsdav login     [--provider buaa] [学号]  log in through an auth provider
+  wpsdav version   print version information
 
 Config discovery: ./wpsdav.json, then ./config.json (override with -c or
 `+envConfigFile+`). SSO credentials fall back to WPSDAV_SSO_USERNAME /

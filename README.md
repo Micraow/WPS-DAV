@@ -1,10 +1,12 @@
 # wpsdav
 
 [![GitHub](https://img.shields.io/badge/GitHub-Micraow%2FWPS--DAV-181717?logo=github)](https://github.com/Micraow/WPS-DAV)
+[![Release](https://github.com/Micraow/WPS-DAV/actions/workflows/release.yml/badge.svg)](https://github.com/Micraow/WPS-DAV/actions/workflows/release.yml)
 ![Go](https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 ![Protocol](https://img.shields.io/badge/protocol-WebDAV-blue)
 ![rclone](https://img.shields.io/badge/works%20with-rclone-1f425f)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 
 **把金山文档（WPS / Kdocs）的云文档空间映射为标准 WebDAV 端点。**
@@ -29,14 +31,24 @@
 
 ## 🚀 快速开始
 
-### 1. 构建
+### 1. 安装
+
+Arch Linux（AUR）：
+
+```bash
+yay -S wpsdav-bin
+# 或 paru -S wpsdav-bin
+```
+
+其他平台可以从 [Releases](https://github.com/Micraow/WPS-DAV/releases) 下载预编译二进制：
+Linux x86_64、Windows x86_64、macOS arm64（Apple Silicon）。
+
+从源码构建：
 
 ```bash
 git clone https://github.com/Micraow/WPS-DAV.git && cd WPS-DAV
 go build -o wpsdav .
 ```
-
-也可以直接下载 Release 中的预编译二进制。
 
 ### 2. 配置
 
@@ -220,6 +232,7 @@ wpsdav doctor    只读自检：登录态、云盘列表、目录读取、下载
 wpsdav groups    列出当前账号可见的全部分组和团队文档
 wpsdav cookie    安装浏览器 Cookie（参数或 stdin）
 wpsdav login     通过指定 Provider 登录（目前内置 buaa）
+wpsdav version   查看版本信息
 ```
 
 通用选项：`-c, --config` 指定配置文件；`-p, --provider` 选择登录 Provider。
