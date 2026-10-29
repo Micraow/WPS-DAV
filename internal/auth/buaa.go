@@ -36,6 +36,9 @@ func NewBuaaProvider(username, password, entryURL string, refresh time.Duration)
 // Name implements Provider.
 func (p *BuaaProvider) Name() string { return "buaa" }
 
+// AutoRenew implements Provider.
+func (p *BuaaProvider) AutoRenew() bool { return true }
+
 // Seed adopts a cookie obtained earlier (e.g. from the cookie cache file).
 func (p *BuaaProvider) Seed(cookie string) bool {
 	if !p.mgr.Seed(cookie) {

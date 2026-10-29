@@ -30,6 +30,10 @@ type Provider interface {
 	// Name identifies the provider (for logs and diagnostics).
 	Name() string
 
+	// AutoRenew reports whether Renew can succeed without user interaction.
+	// Only such providers need a background health supervisor.
+	AutoRenew() bool
+
 	// Renew obtains a fresh cookie header by logging in. It is only called
 	// when the cached credentials are missing or rejected.
 	Renew(ctx context.Context) (string, error)

@@ -272,6 +272,18 @@ wpsdav version   查看版本信息
 
 ## 💡 常见问题
 
+**长期挂载会耗电 / 变慢吗？**
+
+- **空闲时几乎为零**：`cookie` 模式没有任何后台网络请求，只有每 5 秒检查一次 Cookie
+  文件是否有变化；`buaa` 模式每 2 分钟发一次 `islogin` 用于会话自愈。配合
+  `--poll-interval 0`，rclone 也不会轮询。
+- **实测**（Linux x86_64，空闲 60 秒）：CPU `0ms`，RSS 稳定在 `~21MB`，文件描述符不增长。
+  200 次 PROPFIND 共 2.2 秒、CPU 0.11 秒，内存无增长。
+- **下载不占 CPU**：`redirect` 模式下数据由 rclone 直连 CDN，wpsdav 只处理元数据。
+- **内存有上限**：目录缓存每 5 分钟清理一次过期条目，长期浏览大量目录也不会无限增长。
+- 如果系统索引器（Spotlight、Windows Search、tracker）扫描挂载点，会产生额外请求和
+  功耗，建议把挂载目录排除在索引之外。
+
 **为什么看不到上传/下载速度？**
 
 - **下载**：`redirect` 模式下 wpsdav 只返回 302，数据由 rclone 直接从 WPS CDN 传输，

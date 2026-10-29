@@ -340,7 +340,10 @@ func cmdServe(args []string) {
 		client.SetCookie(cookie)
 		tree.ForcedRefresh()
 	})
-	go superviseCredentials(bg, cfg, prov, client, tree)
+	go tree.Janitor(bg, 5*time.Minute)
+	if prov.AutoRenew() {
+		go superviseCredentials(bg, cfg, prov, client, tree)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,

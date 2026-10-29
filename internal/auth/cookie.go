@@ -18,11 +18,14 @@ type CookieProvider struct {
 
 // NewCookieProvider reads the cookie header from path.
 func NewCookieProvider(path string) *CookieProvider {
-	return &CookieProvider{path: path, poll: 3 * time.Second}
+	return &CookieProvider{path: path, poll: 5 * time.Second}
 }
 
 // Name implements Provider.
 func (p *CookieProvider) Name() string { return "cookie" }
+
+// AutoRenew implements Provider: manual cookies cannot be re-issued.
+func (p *CookieProvider) AutoRenew() bool { return false }
 
 // Renew implements Provider: manual cookies cannot be re-issued.
 func (p *CookieProvider) Renew(context.Context) (string, error) { return "", ErrManual }

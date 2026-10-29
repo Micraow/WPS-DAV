@@ -74,3 +74,21 @@ func TestDirFileReaddirEmpty(t *testing.T) {
 		t.Fatalf("second Readdir = %v, want io.EOF", err)
 	}
 }
+
+// TestJanitorEvictsExpired guards the long-run memory bound: expired
+// directory entries must actually be released.
+func TestJanitorEvictsExpired(t *testing.T) {
+	f := &fakeLister{items: map[int64][]wps.FileInfo{}}
+	tree := NewTree(f, 1, 10*time.Millisecond)
+	tree.Seed("/", &Node{Name: "a", ID: 1, GroupID: 1, IsDir: true})
+
+	time.Sleep(30 * time.Millisecond)
+	tree.evictExpired(time.Now())
+
+	tree.mu.Lock()
+	n := len(tree.dirs)
+	tree.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected expired entries to be evicted, still have %d", n)
+	}
+}

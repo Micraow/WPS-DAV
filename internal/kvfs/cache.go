@@ -245,5 +245,33 @@ func (t *Tree) ForcedRefresh() {
 	t.dirs = make(map[string]*dirEntry)
 }
 
+// Janitor periodically drops expired directory entries. Without it, every
+// directory ever browsed would stay resident for the life of the process.
+func (t *Tree) Janitor(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.evictExpired(t.nowFunc())
+		}
+	}
+}
+
+func (t *Tree) evictExpired(now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for p, de := range t.dirs {
+		if de.expires.Before(now) {
+			delete(t.dirs, p)
+		}
+	}
+}
+
 // ErrReadOnly is returned when a mutating operation is disabled.
 var ErrReadOnly = errors.New("read-only mode")
