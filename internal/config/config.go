@@ -1,0 +1,185 @@
+// Package config loads the wpsdav service configuration.
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Mode selects which WPS product the middle layer talks to.
+type Mode string
+
+const (
+	// ModePersonal talks to the consumer WPS netdisk (drive.kdocs.cn).
+	ModePersonal Mode = "personal"
+	// ModeBusiness talks to WPS 365 (365.kdocs.cn, /3rd/drive prefix).
+	ModeBusiness Mode = "business"
+)
+
+// DownloadMode controls whether GET is answered with a redirect to the
+// presigned storage URL or proxied through this process.
+type DownloadMode string
+
+const (
+	// DownloadRedirect sends a 302 so bulk traffic never touches this layer.
+	DownloadRedirect DownloadMode = "redirect"
+	// DownloadProxy streams bytes through this process (fallback when the
+	// storage CDN rejects non-browser clients).
+	DownloadProxy DownloadMode = "proxy"
+)
+
+// Config is the on-disk service configuration.
+type Config struct {
+	Mode Mode `json:"mode"`
+
+	// Listen is the HTTP listen address, e.g. "127.0.0.1:8080".
+	Listen string `json:"listen"`
+
+	// DAVPath is the mount point of the WebDAV handler, e.g. "/dav".
+	DAVPath string `json:"dav_path"`
+
+	// Username/Password protect the WebDAV endpoint with basic auth.
+	Username string `json:"username"`
+	Password string `json:"password"`
+
+	// CookieFile stores the browser cookie header value used for API calls.
+	// In SSO mode it is written automatically after each login.
+	CookieFile string `json:"cookie_file"`
+
+	// Auth selects how cookies are obtained: "cookie" (manual) or "buaa"
+	// (BUAA unified SSO via wps.buaa.edu.cn).
+	Auth AuthConfig `json:"auth"`
+
+	// RootGroupID optionally pins the group mounted at "/". Zero means:
+	// personal mode auto-discovers the special group; business mode requires it.
+	RootGroupID int64 `json:"root_group_id"`
+
+	// CompanyID is only used in business mode. Zero means: read it from
+	// the islogin response (current_companyid/companyid).
+	CompanyID int64 `json:"company_id"`
+
+	// DownloadMode is "redirect" (default) or "proxy".
+	DownloadMode DownloadMode `json:"download_mode"`
+
+	// CacheTTLSeconds is the directory listing cache lifetime.
+	CacheTTLSeconds int `json:"cache_ttl_seconds"`
+
+	// CustomUA overrides the User-Agent sent to the WPS API and downloaded
+	// links. Empty means a Chrome-like UA.
+	CustomUA string `json:"custom_ua"`
+
+	// SpoolDir is where uploads are buffered (they must be hashed before the
+	// create_update call). Empty means the system temp dir.
+	SpoolDir string `json:"spool_dir"`
+}
+
+// AuthConfig selects and configures the credential source.
+type AuthConfig struct {
+	// Mode is "cookie" (default) or "buaa".
+	Mode string    `json:"mode"`
+	SSO  SSOConfig `json:"sso"`
+}
+
+// SSOConfig configures the optional BUAA unified login layer.
+type SSOConfig struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// EntryURL defaults to https://wps.buaa.edu.cn/.
+	EntryURL string `json:"entry_url"`
+	// RefreshMinutes is how often to renew the session (grant_token first,
+	// full login if that fails). Default 240 (sid lives ~3 days).
+	RefreshMinutes int `json:"refresh_minutes"`
+}
+
+// Default returns the baseline configuration.
+func Default() *Config {
+	return &Config{
+		Mode:            ModePersonal,
+		Listen:          "127.0.0.1:8080",
+		DAVPath:         "/dav",
+		CookieFile:      "cookie.txt",
+		DownloadMode:    DownloadRedirect,
+		CacheTTLSeconds: 60,
+		Auth: AuthConfig{
+			Mode: "cookie",
+			SSO: SSOConfig{
+				EntryURL:       "https://wps.buaa.edu.cn/",
+				RefreshMinutes: 240,
+			},
+		},
+	}
+}
+
+// Load reads the JSON config at path, applying defaults for missing fields.
+func Load(path string) (*Config, error) {
+	cfg := Default()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	// Relative paths in the config are resolved against the config file's
+	// directory, so `--config /path/to/wpsdav.json` works from anywhere.
+	if !filepath.IsAbs(cfg.CookieFile) {
+		cfg.CookieFile = filepath.Join(filepath.Dir(path), cfg.CookieFile)
+	}
+	if cfg.SpoolDir != "" && !filepath.IsAbs(cfg.SpoolDir) {
+		cfg.SpoolDir = filepath.Join(filepath.Dir(path), cfg.SpoolDir)
+	}
+	return cfg, nil
+}
+
+// Validate checks the configuration for inconsistencies.
+func (c *Config) Validate() error {
+	if c.Mode != ModePersonal && c.Mode != ModeBusiness {
+		return fmt.Errorf("mode must be %q or %q", ModePersonal, ModeBusiness)
+	}
+	if c.Listen == "" {
+		return errors.New("listen is required")
+	}
+	if c.DAVPath == "" {
+		c.DAVPath = "/dav"
+	}
+	if !strings.HasPrefix(c.DAVPath, "/") {
+		return errors.New("dav_path must start with /")
+	}
+	if c.CookieFile == "" {
+		return errors.New("cookie_file is required")
+	}
+	switch c.DownloadMode {
+	case DownloadRedirect, DownloadProxy:
+	case "":
+		c.DownloadMode = DownloadRedirect
+	default:
+		return fmt.Errorf("download_mode must be %q or %q", DownloadRedirect, DownloadProxy)
+	}
+	if c.CacheTTLSeconds <= 0 {
+		c.CacheTTLSeconds = 60
+	}
+	if c.Mode == ModeBusiness && c.RootGroupID == 0 {
+		return errors.New("business mode requires root_group_id (run `wpsdav groups` to list them)")
+	}
+	switch c.Auth.Mode {
+	case "", "cookie":
+		c.Auth.Mode = "cookie"
+	case "buaa":
+		if c.Auth.SSO.EntryURL == "" {
+			c.Auth.SSO.EntryURL = "https://wps.buaa.edu.cn/"
+		}
+		if c.Auth.SSO.RefreshMinutes <= 0 {
+			c.Auth.SSO.RefreshMinutes = 240
+		}
+	default:
+		return fmt.Errorf("auth.mode must be %q or %q", "cookie", "buaa")
+	}
+	return nil
+}

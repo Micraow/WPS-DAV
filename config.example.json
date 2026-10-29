@@ -1,0 +1,23 @@
+{
+  "mode": "personal",
+  "listen": "127.0.0.1:8080",
+  "dav_path": "/dav",
+  "username": "wpsdav",
+  "password": "change-me",
+  "cookie_file": "cookie.txt",
+  "auth": {
+    "mode": "cookie",
+    "sso": {
+      "username": "",
+      "password": "",
+      "entry_url": "https://wps.buaa.edu.cn/",
+      "refresh_minutes": 240
+    }
+  },
+  "root_group_id": 0,
+  "company_id": 0,
+  "download_mode": "redirect",
+  "cache_ttl_seconds": 60,
+  "custom_ua": "",
+  "spool_dir": ""
+}
