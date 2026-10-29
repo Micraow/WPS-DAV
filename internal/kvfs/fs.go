@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"mime"
 	"os"
 	"path"
@@ -19,6 +20,7 @@ import (
 
 	"golang.org/x/net/webdav"
 
+	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
 )
 
@@ -111,6 +113,7 @@ func (fs *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileM
 		sha1:    sha1.New(),
 		sha256:  sha256.New(),
 		md5:     md5.New(),
+		start:   time.Now(),
 	}
 	// Detect an existing target so the upload replaces it instead of
 	// letting WPS mint a "name(1)" duplicate.
@@ -316,6 +319,7 @@ type uploadFile struct {
 	sha1, sha256, md5 hash.Hash
 	written           int64
 	overwriteID       int64
+	start             time.Time
 	closed            bool
 }
 
@@ -357,9 +361,12 @@ func (u *uploadFile) Close() error {
 		Hashes:          hashes,
 		OverwriteFileID: u.overwriteID,
 	}, u.tmp)
+	fullPath := path.Join(u.dirPath, u.name)
 	if err != nil {
+		log.Printf("%s upload failed: %s: %v", ui.Tag("upload"), fullPath, err)
 		return err
 	}
+	log.Printf("%s", ui.TransferLine("upload", fullPath, hashes.Size, time.Since(u.start)))
 	newID := resp.ID
 	if newID == 0 {
 		newID = u.overwriteID

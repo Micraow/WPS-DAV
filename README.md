@@ -272,6 +272,20 @@ wpsdav version   查看版本信息
 
 ## 💡 常见问题
 
+**为什么看不到上传/下载速度？**
+
+- **下载**：`redirect` 模式下 wpsdav 只返回 302，数据由 rclone 直接从 WPS CDN 传输，
+  中间层看不到字节，所以无法在 wpsdav 端显示速度。用 rclone 自己的进度显示：
+  `rclone mount ... --progress`（或 `--stats 1s --stats-one-line`）。
+  如果确实需要中间层测速，可切换 `download_mode: "proxy"`，但会失去直链带宽优势。
+- **上传**：数据经过 wpsdav（先落盘算哈希再传），完成后会输出一行测速，例如：
+  `[upload] /资料/报告.pdf  12.5 MiB in 2.1s (6.0 MiB/s)`。
+
+**CLI 颜色**
+
+wpsdav 会自动检测终端：交互式终端下输出彩色，管道/日志文件中保持纯文本。
+设置 `NO_COLOR=1` 或 `TERM=dumb` 可以强制关闭颜色。
+
 **修改时间为什么总是不对？会不会导致 rclone 重复上传？**
 
 WPS 没有提供设置 mtime 的接口，云端保存的是“上传时间”，所以每次上传后文件的修改时间

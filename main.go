@@ -27,6 +27,7 @@ import (
 	"wpsdav/internal/config"
 	"wpsdav/internal/kvfs"
 	"wpsdav/internal/server"
+	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
 )
 
@@ -67,24 +68,24 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `wpsdav - WPS cloud drive as WebDAV for rclone
-
-usage:
-  wpsdav init      create a config file with a generated password
-  wpsdav serve     run the WebDAV/control server
-  wpsdav doctor    check credentials, listing, and download-URL behavior
-  wpsdav groups    list drives (groups) visible to the account
-  wpsdav cookie    install a cookie from an argument or stdin
-  wpsdav login     [--provider buaa] [学号]  log in through an auth provider
-  wpsdav version   print version information
-
-Config discovery (first match wins):
-  --config PATH, $WPSDAV_CONFIG, ./wpsdav.json, ./config.json,
-  ~/.config/wpsdav/config.json, /etc/wpsdav/config.json
-
-Run "wpsdav init" to create a user config with a generated password.
-SSO credentials fall back to WPSDAV_SSO_USERNAME / WPSDAV_SSO_PASSWORD.
-`)
+	fmt.Fprintf(os.Stderr, "%s\n\n%s\n", ui.Bold("wpsdav - WPS cloud drive as WebDAV for rclone"), ui.Bold("usage:"))
+	rows := [][2]string{
+		{"init", "create a config file with a generated password"},
+		{"serve", "run the WebDAV/control server"},
+		{"doctor", "check credentials, listing, and download-URL behavior"},
+		{"groups", "list drives (groups) visible to the account"},
+		{"cookie", "install a cookie from an argument or stdin"},
+		{"login", "[-p buaa] [学号]  log in through an auth provider"},
+		{"version", "print version information"},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(os.Stderr, "  %s  %s\n", ui.Cyan(fmt.Sprintf("%-8s", row[0])), row[1])
+	}
+	fmt.Fprintf(os.Stderr, "\n%s\n", ui.Bold("Config discovery (first match wins):"))
+	fmt.Fprintln(os.Stderr, "  --config PATH, $WPSDAV_CONFIG, ./wpsdav.json, ./config.json,")
+	fmt.Fprintln(os.Stderr, "  ~/.config/wpsdav/config.json, /etc/wpsdav/config.json")
+	fmt.Fprintf(os.Stderr, "\nRun %s to create a user config with a generated password.\n", ui.Cyan("wpsdav init"))
+	fmt.Fprintln(os.Stderr, "SSO credentials fall back to WPSDAV_SSO_USERNAME / WPSDAV_SSO_PASSWORD.")
 }
 
 // configPath resolves the config file: flag, env, then standard locations.
@@ -116,7 +117,7 @@ func loadConfig(fs *pflag.FlagSet) *config.Config {
 	if err != nil {
 		log.Fatalf("config %s: %v", cfgFile, err)
 	}
-	log.Printf("config: %s", cfgFile)
+	log.Printf("config: %s", ui.Dim(cfgFile))
 	return cfg
 }
 
@@ -262,16 +263,14 @@ func cmdInit(args []string) {
 		log.Fatalf("write %s: %v", cfgPath, err)
 	}
 
-	fmt.Printf(`config written: %s (0600)
-cookie file:    %s
-WebDAV user:    %s
-WebDAV pass:    %s
-
-next steps:
-  1. wpsdav login --provider buaa 学号   # 或 wpsdav cookie
-  2. wpsdav doctor
-  3. wpsdav serve
-`, cfgPath, cookiePath, cfg.Username, password)
+	fmt.Printf("%s %s (0600)\n", ui.Bold("config written:"), cfgPath)
+	fmt.Printf("%s %s\n", ui.Bold("cookie file:   "), cookiePath)
+	fmt.Printf("%s %s\n", ui.Bold("WebDAV user:   "), cfg.Username)
+	fmt.Printf("%s %s\n", ui.Bold("WebDAV pass:   "), ui.Cyan(password))
+	fmt.Printf("\n%s\n", ui.Bold("next steps:"))
+	fmt.Println("  1. wpsdav login --provider buaa 学号   # 或 wpsdav cookie")
+	fmt.Println("  2. wpsdav doctor")
+	fmt.Println("  3. wpsdav serve")
 }
 
 func randomPassword(n int) (string, error) {
@@ -352,7 +351,7 @@ func cmdServe(args []string) {
 	}
 
 	go func() {
-		log.Printf("listening on %s (dav path %s, download mode %s)", cfg.Listen, cfg.DAVPath, cfg.DownloadMode)
+		log.Printf("listening on %s (dav path %s, download mode %s)", ui.Cyan(cfg.Listen), cfg.DAVPath, cfg.DownloadMode)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
@@ -484,19 +483,19 @@ func cmdDoctor(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	fmt.Println("== credentials ==")
+	fmt.Println(ui.Bold("== credentials =="))
 	st, err := ensureCredentials(ctx, cfg, prov, client)
 	if err != nil {
-		fmt.Printf("FAIL no usable credentials: %v\n", err)
+		fmt.Printf("%s no usable credentials: %v\n", ui.Red("FAIL"), err)
 		os.Exit(1)
 	}
-	fmt.Printf("OK   provider=%s userid=%d company=%d company_account=%v\n",
-		prov.Name(), st.UserID, st.CurrentCompanyID, st.IsCompanyAccount)
+	fmt.Printf("%s   provider=%s userid=%d company=%d company_account=%v\n",
+		ui.Green("OK"), prov.Name(), st.UserID, st.CurrentCompanyID, st.IsCompanyAccount)
 
-	fmt.Println("== groups ==")
+	fmt.Println(ui.Bold("== groups =="))
 	groups, err := client.Groups(ctx)
 	if err != nil {
-		fmt.Printf("FAIL groups: %v\n", err)
+		fmt.Printf("%s groups: %v\n", ui.Red("FAIL"), err)
 	} else {
 		for _, g := range groups {
 			fmt.Printf("     %-16d %s\n", g.GroupID, g.Name)
@@ -507,21 +506,21 @@ func cmdDoctor(args []string) {
 	if rootID == 0 && cfg.Mode == config.ModePersonal {
 		rootID, err = client.SpecialGroup(ctx)
 		if err != nil {
-			fmt.Printf("FAIL special group: %v\n", err)
+			fmt.Printf("%s special group: %v\n", ui.Red("FAIL"), err)
 		}
 	}
 	if rootID == 0 {
-		fmt.Println("SKIP listing (no root group resolved)")
+		fmt.Println(ui.Yellow("SKIP listing (no root group resolved)"))
 		return
 	}
 
-	fmt.Println("== listing ==")
+	fmt.Println(ui.Bold("== listing =="))
 	files, err := client.ListAll(ctx, rootID, 0)
 	if err != nil {
-		fmt.Printf("FAIL list root: %v\n", err)
+		fmt.Printf("%s list root: %v\n", ui.Red("FAIL"), err)
 		return
 	}
-	fmt.Printf("OK   %d entries at root\n", len(files))
+	fmt.Printf("%s   %d entries at root\n", ui.Green("OK"), len(files))
 	var sample *wps.FileInfo
 	for i := range files {
 		f := &files[i]
@@ -536,17 +535,17 @@ func cmdDoctor(args []string) {
 		}
 	}
 	if sample == nil {
-		fmt.Println("SKIP download-URL test (no file at root)")
+		fmt.Println(ui.Yellow("SKIP download-URL test (no file at root)"))
 		return
 	}
 
-	fmt.Println("== download url ==")
+	fmt.Println(ui.Bold("== download url =="))
 	link, hdr, err := client.ResolveDownloadURL(ctx, sample.GroupID, sample.ID)
 	if err != nil {
-		fmt.Printf("FAIL get download url: %v\n", err)
+		fmt.Printf("%s get download url: %v\n", ui.Red("FAIL"), err)
 		return
 	}
-	fmt.Printf("OK   link for %q\n", sample.Name)
+	fmt.Printf("%s   link for %q\n", ui.Green("OK"), sample.Name)
 
 	profiles := []struct {
 		name    string
@@ -567,7 +566,7 @@ func cmdDoctor(args []string) {
 		}
 		mark := " "
 		if code >= 200 && code < 400 {
-			mark = "OK"
+			mark = ui.Green("OK")
 			if strings.Contains(p.name, "rclone-like") {
 				redirectOK = true
 			}
@@ -575,9 +574,9 @@ func cmdDoctor(args []string) {
 		fmt.Printf("%-4s %-28s %-40s (%s)\n", mark, p.name, state, p.note)
 	}
 	if redirectOK {
-		fmt.Println("\nrecommendation: download_mode=redirect — bulk traffic bypasses wpsdav")
+		fmt.Println("\n" + ui.Bold(ui.Green("recommendation: download_mode=redirect — bulk traffic bypasses wpsdav")))
 	} else {
-		fmt.Println("\nrecommendation: download_mode=proxy — the CDN rejects non-browser clients")
+		fmt.Println("\n" + ui.Bold(ui.Yellow("recommendation: download_mode=proxy — the CDN rejects non-browser clients")))
 	}
 }
 

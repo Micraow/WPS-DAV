@@ -21,6 +21,7 @@ import (
 
 	"wpsdav/internal/config"
 	"wpsdav/internal/kvfs"
+	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
 )
 
@@ -211,7 +212,9 @@ func (s *Server) proxyDownload(w http.ResponseWriter, r *http.Request, link stri
 	}
 	bp := s.bufPool.Get().(*[]byte)
 	defer s.bufPool.Put(bp)
-	_, _ = io.CopyBuffer(w, resp.Body, *bp)
+	start := time.Now()
+	n, _ := io.CopyBuffer(w, resp.Body, *bp)
+	log.Printf("%s", ui.TransferLine("download", r.URL.Path, n, time.Since(start)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
