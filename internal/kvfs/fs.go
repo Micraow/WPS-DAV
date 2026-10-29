@@ -410,6 +410,7 @@ type dirFile struct {
 	path string
 	node *Node
 	off  int
+	done bool
 }
 
 func (d *dirFile) Close() error                   { return nil }
@@ -428,11 +429,27 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	if count <= 0 {
+		// "all entries": the first call returns the full slice (possibly
+		// empty) with a nil error; the next call reports io.EOF.
+		if d.done {
+			return nil, io.EOF
+		}
+		d.done = true
+		d.off = len(names)
+		out := make([]os.FileInfo, 0, len(names))
+		for _, name := range names {
+			out = append(out, nodeInfo{children[name]})
+		}
+		return out, nil
+	}
+
 	if d.off >= len(names) {
 		return nil, io.EOF
 	}
 	end := len(names)
-	if count > 0 && d.off+count < end {
+	if d.off+count < end {
 		end = d.off + count
 	}
 	out := make([]os.FileInfo, 0, end-d.off)

@@ -36,9 +36,14 @@ type inflightCall struct {
 	err      error
 }
 
+// Lister is the subset of the WPS client the cache needs.
+type Lister interface {
+	ListAll(ctx context.Context, groupID, parentID int64) ([]wps.FileInfo, error)
+}
+
 // Tree is the cached view of one WPS group.
 type Tree struct {
-	client   *wps.Client
+	client   Lister
 	rootID   int64
 	ttl      time.Duration
 	mu       sync.Mutex
@@ -48,7 +53,7 @@ type Tree struct {
 }
 
 // NewTree builds a cache rooted at the given group.
-func NewTree(client *wps.Client, rootGroupID int64, ttl time.Duration) *Tree {
+func NewTree(client Lister, rootGroupID int64, ttl time.Duration) *Tree {
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
@@ -80,7 +85,7 @@ func (t *Tree) Stat(ctx context.Context, p string) (*Node, error) {
 	}
 	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	cur := t.Root()
-	curPath := ""
+	curPath := "/"
 	for _, part := range parts {
 		if !cur.IsDir {
 			return nil, os.ErrNotExist
@@ -94,7 +99,7 @@ func (t *Tree) Stat(ctx context.Context, p string) (*Node, error) {
 			return nil, os.ErrNotExist
 		}
 		cur = next
-		curPath += "/" + part
+		curPath = path.Join(curPath, part)
 	}
 	return cur, nil
 }

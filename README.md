@@ -1,173 +1,285 @@
 # wpsdav
 
-把 WPS 云文档（个人版 / WPS 365）通过 **WebDAV** 暴露给 rclone 等客户端挂载。
+[![GitHub](https://img.shields.io/badge/GitHub-Micraow%2FWPS--DAV-181717?logo=github)](https://github.com/Micraow/WPS-DAV)
+![Go](https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![Protocol](https://img.shields.io/badge/protocol-WebDAV-blue)
+![rclone](https://img.shields.io/badge/works%20with-rclone-1f425f)
+![Status](https://img.shields.io/badge/status-experimental-orange)
 
-核心设计是**控制面 / 数据面分离**：
+**把金山文档（WPS / Kdocs）的云文档空间映射为标准 WebDAV 端点。**
 
-```
-rclone ──PROPFIND/PUT/MOVE/COPY/DELETE──▶ wpsdav ──Cookie──▶ WPS API
-   │                                        │
-   └──────── GET → 302 ──▶ 预签名存储 URL ──▶ WPS 对象存储
-```
+*Map your Jinshan Docs / WPS cloud drive as a standard WebDAV endpoint.*
 
-- 元数据操作走 wpsdav（轻量 JSON 请求）。
-- 下载时 wpsdav 返回 `302` 指向 WPS 的预签名临时 URL，数据从 WPS CDN 直达 rclone。
-  实测该 URL 对 rclone UA、curl UA、甚至无 UA 的客户端都返回 206，因此
-  `download_mode: "redirect"` 下**大流量完全不经过中间层**，wpsdav 可以部署成任意
-  位置的轻量控制面。
-- 上传必须经过 wpsdav：WPS 的三段式上传要求先提交 sha1/sha256/md5 和大小换取
-  存储直传地址，客户端无法独立完成。
+用 rclone、Finder、Windows 资源管理器、RaiDrive、Cyberduck 或任何 WebDAV 客户端，
+把「我的云文档」和团队文档库直接挂载成本地盘符。
 
-## 快速开始
+> ⚠️ 本项目基于**非官方逆向接口**实现，上游随时可能变更或失效。请勿用于关键数据，
+> 使用前请自行评估账号风险。
+
+## ✨ 为什么用 wpsdav
+
+- 🚀 **下载不经过中间层**：文件读取返回 302 跳转到 WPS 预签名直链，数据从 WPS CDN
+  直达客户端。挂载在低配 VPS 上也不会成为带宽瓶颈。
+- 🗂️ **真正的文件系统语义**：目录、重命名、移动、复制、删除全部映射到云端原生操作，
+  不是前缀模拟出来的假目录。
+- 🔁 **可长期无人值守**：Cookie 热加载；可选 SSO Provider 自动登录与续期。
+- 🧩 **面向所有人**：个人版和 WPS 365 企业版都支持，浏览器 Cookie 即可上手。
+- 🪶 **单文件部署**：一个静态编译的二进制，没有运行时依赖。
+
+## 🚀 快速开始
+
+### 1. 构建
 
 ```bash
+git clone https://github.com/Micraow/WPS-DAV.git && cd WPS-DAV
 go build -o wpsdav .
-cp config.example.json wpsdav.json     # 改 username/password
 ```
 
-配置放在当前目录（`wpsdav.json`，找不到则用 `config.json`），所以日常不需要传参数：
+也可以直接下载 Release 中的预编译二进制。
+
+### 2. 配置
 
 ```bash
-wpsdav cookie 'u=...; wps_sid=...; ...'   # 从浏览器 DevTools 复制整串 Cookie
-wpsdav doctor                             # 只读诊断：登录态、分组、列表、下载 URL
-wpsdav serve                              # 启动
+cp config.example.json wpsdav.json
 ```
 
-命令行遵循 GNU 惯例：长选项用 `--`，短选项用单横线（例如 `-c, --config`、
-`-p, --provider`）。`--config` 指向其他目录时，配置里的相对路径（`cookie_file`、
-`spool_dir`）按配置文件所在目录解析。
+至少修改 `username` 和 `password`（WebDAV 端点的登录凭据）。程序默认读取当前目录的
+`wpsdav.json`，所以日常启动不需要任何参数。
 
-`doctor` 会用 rclone 风格的 UA（不带 Referer）探测下载链接。通过则保持
-`download_mode: "redirect"`；若 CDN 拒绝非浏览器客户端，改为 `"proxy"`（数据会经过
-wpsdav）。
+### 3. 导入 Cookie
 
-## 认证 Provider
-
-认证被抽象成独立的 provider 层（`internal/auth`），HTTP、缓存、CLI 均不感知登录
-方式。`auth.mode` 选择实现：
-
-| mode | 行为 |
-|---|---|
-| `cookie`（默认） | 从 `cookie_file` 读取；文件变化 3 秒内热加载 |
-| `buaa` | 通过北航统一身份认证（`wps.buaa.edu.cn` → CAS）登录，`wps_sid` 自动获取与续期；登录结果写回 `cookie_file` 作为缓存 |
-
-`buaa` 模式示例：
-
-```json
-{
-  "auth": {
-    "mode": "buaa",
-    "sso": {
-      "username": "学号",
-      "password": "密码",
-      "entry_url": "https://wps.buaa.edu.cn/",
-      "refresh_minutes": 240
-    }
-  }
-}
-```
-
-登录是显式选择 provider 的命令（目前支持北航）：
+浏览器打开 [金山文档](https://www.kdocs.cn)，登录后按 `F12` → Network → 任意请求 →
+复制请求头里的整串 `Cookie`：
 
 ```bash
-wpsdav login --provider buaa 学号   # 交互式输入密码，写入 cookie_file（-p 为短选项）
+wpsdav cookie
+# 粘贴后按 Ctrl-D（Windows 按 Ctrl-Z 回车）
 ```
 
-密码可以只放在环境变量里，避免落盘：
+也可以直接写在参数里：`wpsdav cookie 'u=...; wps_sid=...; ...'`。
+
+### 4. 自检
 
 ```bash
-export WPSDAV_SSO_USERNAME=...
-export WPSDAV_SSO_PASSWORD=...
-wpsdav login --provider buaa
+wpsdav doctor
+```
+
+会依次检查登录态、云盘列表、目录读取和下载直链。看到
+`recommendation: download_mode=redirect` 就说明下载可以完全不经过中间层。
+
+### 5. 启动
+
+```bash
 wpsdav serve
+# listening on 127.0.0.1:8705 (dav path /dav, download mode redirect)
 ```
 
-也可以完全不配置密码：先用 `wpsdav login --provider buaa` 登录一次，之后
-`serve` 直接使用 `cookie_file` 里的缓存 Cookie。只要缓存里的 `rtk` 还有效，
-后台会用 `grant_token` 自动续期；`rtk` 失效时才需要重新登录。
+## 🔌 挂载
 
-SSO 链路：CAS 登录页 → 提交学号密码 → ticket → `verify_active` 换 ssid →
-ECDSA P-256 签名登录 → `.wps.cn` 全套 Cookie；之后用 `rtk` 走 `grant_token` 续期，
-失效则自动重登。密码不落盘、不进日志（除非写进配置文件）。该流程移植自
-`comate-gateway` 已验证的协议实现；连续输错会触发验证码，需先在浏览器登录解除。
+### rclone
 
-## 模块结构
+最简配置与挂载：
 
-```
-main.go            命令行与装配（serve/doctor/groups/cookie/login）
-internal/config    配置加载与校验
-internal/auth      Provider 接口 + cookie / buaa 两个实现
-internal/sso       北航 CAS 协议客户端（纯 HTTP，无配置/文件依赖）
-internal/wps       WPS API 客户端（列表/下载链接/上传/文件操作）
-internal/kvfs      WebDAV 文件系统适配 + 路径解析 + 目录缓存
-internal/server    HTTP 层：Basic Auth、DAV 挂载、302 拦截、控制端点
+```bash
+rclone config create wpsdav webdav \
+  url=http://127.0.0.1:8705/dav \
+  vendor=other \
+  user=wpsdav \
+  pass=$(rclone obscure '你的密码')
+
+rclone mount wpsdav: /mnt/wps --vfs-cache-mode writes
 ```
 
-依赖方向单向：`main → server/auth → kvfs/sso → wps → config`。`sso` 只做协议，
-`auth` 只产 Cookie，`server` 只做 HTTP，`kvfs` 只做路径/缓存语义。
+就这两条命令即可日常使用。
 
-## rclone 配置
-
-```ini
-[wpsdav]
-type = webdav
-url = http://127.0.0.1:8080/dav
-vendor = other
-user = wpsdav
-pass = <rclone obscure 后的密码>
-```
-
-挂载：
+<details>
+<summary>🚀 高性能 + 低磁盘占用配置（推荐长期挂载）</summary>
 
 ```bash
 rclone mount wpsdav: /mnt/wps \
   --vfs-cache-mode writes \
+  --vfs-cache-max-size 5G \
+  --vfs-cache-max-age 24h \
   --dir-cache-time 1m \
   --poll-interval 0 \
-  --transfers 4
+  --transfers 8 \
+  --checkers 12 \
+  --buffer-size 32M \
+  --vfs-read-ahead 32M \
+  --vfs-read-chunk-size 16M \
+  --vfs-read-chunk-size-limit 128M \
+  --size-only \
+  --filter "- .*"
 ```
 
-同步：
+| 参数 | 作用与取值理由 |
+|---|---|
+| `--vfs-cache-mode writes` | **只缓存待上传的写入**，读取直接流式走 302 直链，不占读缓存。磁盘占用最小，适合不想让挂载吃掉空间的场景 |
+| `--vfs-cache-max-size 5G` | 写缓存上限；按可用磁盘调整。写的文件上传完成后缓存会被回收 |
+| `--vfs-cache-max-age 24h` | 缓存最长保留时间，兜底清理 |
+| `--dir-cache-time 1m` | 目录列表缓存 1 分钟；调大可减少 WPS 请求，但看不到别人刚分享的文件 |
+| `--poll-interval 0` | WebDAV 后端不支持变更轮询，设为 0 避免无意义请求 |
+| `--transfers 8` | 并发上传数。WPS 对高频写敏感，8 是较稳妥的上限，遇到限流可降到 4 |
+| `--checkers 12` | 并发元数据检查数；16 核机器上 12 足够快，也不至于压垮接口 |
+| `--buffer-size 32M` | 每个传输的内存缓冲；大文件顺序读写更顺（8 并发约 256M 内存） |
+| `--vfs-read-ahead 32M` | 预读窗口；下载走 302 直链，预读能充分利用带宽 |
+| `--vfs-read-chunk-size 16M` | 起始 Range 块大小，随后按需翻倍 |
+| `--vfs-read-chunk-size-limit 128M` | Range 块增长上限，避免单次请求过大 |
+| `--size-only` | **必加**：云端修改时间不可控，按大小比较可避免重复上传（见下方 FAQ） |
+| `--filter "- .*"` | **必加**：WPS 拒绝点开头的文件名，过滤后可避免报错 |
+
+> 💡 如果你经常随机读大文件、或用 Office 类软件反复编辑同一个文档，可以把
+> `--vfs-cache-mode` 改为 `full` 获得更好的随机读性能；此时读数据也会落盘，
+> 建议同时设置 `--vfs-cache-max-size 20G` 之类的上限。
+
+如果只是偶尔同步（不是挂载），推荐：
 
 ```bash
-rclone sync /local wpsdav: --size-only --filter "- .*"
+rclone sync /本地目录 wpsdav:备份目录 --size-only --filter "- .*" --transfers 8
 ```
 
-- `--size-only` 是必须的：WPS API 无法设置 mtime，云端修改时间恒为上传时间。
-  注意 `size_only` 写进 rclone.conf 会被部分版本静默忽略。
-- `--filter "- .*"` 过滤点开头的文件：WPS 拒绝此类文件名（返回 400“文件名为空”）。
+</details>
 
-## 运维
+### 其他客户端
 
-- **Cookie 更新**：覆盖 `cookie.txt`（自动热加载），或
-  `curl -u user:pass -X PUT --data-binary @cookie.txt http://127.0.0.1:8080/admin/cookie`。
-- **健康检查**：`curl -u user:pass http://127.0.0.1:8080/healthz?quota=1`。
-- **清缓存**：`curl -u user:pass -X POST http://127.0.0.1:8080/admin/refresh`。
-- **凭据自愈**：serve 每 2 分钟校验一次登录态；失效时按 provider 自动重登
-  （cookie 模式会打警告，buaa 模式会重新登录）。
-- **远程部署**：监听 `0.0.0.0:8080` 时必须放在 TLS 反代后面；Cookie 等价于完整
-  账号权限，`cookie.txt` 保持 0600。
-- **管理多个盘**：`wpsdav groups` 列出全部分组/团队文档；把目标 id 填进
-  `root_group_id` 即可挂载。`mode: "business"` 走 WPS 365 企业接口，需要
-  `root_group_id`；`personal`（默认）自动挂载“我的企业文档”。
+| 客户端 | 地址 |
+|---|---|
+| macOS Finder | `⌘K` → `http://127.0.0.1:8705/dav` |
+| Windows 资源管理器 | 添加网络位置 → `http://127.0.0.1:8705/dav`（或映射网络驱动器 `\\127.0.0.1@8705\dav`） |
+| RaiDrive / Cyberduck / WinSCP | 新建 WebDAV 连接，填同一地址 |
 
-## 已知限制
+## 🧭 工作原理
+
+```
+WebDAV 客户端 ──PROPFIND/PUT/MOVE──▶ wpsdav ──Cookie──▶ WPS API
+      │                                │
+      └────── GET → 302 ──▶ 预签名直链 ──▶ WPS 对象存储
+```
+
+- **元数据**（列目录、建目录、改名、移动、复制、删除）由 wpsdav 调用 WPS API 完成。
+- **下载**返回 302，客户端直接向 WPS CDN 取数据，中间层只承担几百字节的控制流量。
+- **上传**必须经过 wpsdav：WPS 要求先提交文件哈希和大小换取直传地址，客户端无法
+  独立完成。上传后 wpsdav 会把新文件直接注入目录缓存，规避云端列表的最终一致延迟。
+
+## 🔐 认证
+
+默认使用浏览器 Cookie，开箱即用。登录方式被抽象成独立的 Provider，可按需切换：
+
+| Provider | 适用场景 | 说明 |
+|---|---|---|
+| `cookie` | 所有人、个人版、企业版 | 从浏览器复制 Cookie；文件变化会自动热加载 |
+| `buaa` | 北京航空航天大学账号（可选示例） | 通过学校统一身份认证登录，自动获取并续期 Cookie |
+
+北航 SSO 只是一个内置示例，Provider 接口与具体身份源解耦，欢迎贡献其他学校或
+IdP 的实现。
+
+```bash
+# 使用北航统一身份认证登录（交互式输入密码，不落盘）
+wpsdav login --provider buaa 学号
+
+# 日常使用 Cookie 模式即可
+wpsdav cookie
+```
+
+不保存密码也能长期运行：登录一次后，`serve` 会使用缓存的 Cookie，并在后台通过
+刷新令牌自动续期，直到刷新令牌失效才需要重新登录。
+
+## ⚙️ 配置
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `mode` | `personal` | `personal`（个人版接口）或 `business`（WPS 365 接口） |
+| `listen` | `127.0.0.1:8705` | HTTP 监听地址 |
+| `dav_path` | `/dav` | WebDAV 挂载路径 |
+| `username` / `password` | — | WebDAV 端点的 Basic Auth 凭据（必填） |
+| `cookie_file` | `cookie.txt` | Cookie 缓存文件 |
+| `auth.mode` | `cookie` | `cookie` 或 `buaa` |
+| `auth.sso.username` / `password` | — | SSO 账号（也可用环境变量，见下） |
+| `auth.sso.entry_url` | `https://wps.buaa.edu.cn/` | SSO 入口 |
+| `auth.sso.refresh_minutes` | `240` | 后台续期间隔 |
+| `root_group_id` | `0` | 挂载指定分组/团队文档；`0` 表示自动选择 |
+| `company_id` | `0` | 企业 ID，`0` 表示自动识别 |
+| `download_mode` | `redirect` | `redirect`（302 直链）或 `proxy`（中间层转发） |
+| `cache_ttl_seconds` | `60` | 目录缓存时间 |
+| `custom_ua` | — | 自定义 User-Agent |
+| `spool_dir` | 系统临时目录 | 上传缓冲目录 |
+
+SSO 密码也可以只放在环境变量里：
+
+```bash
+export WPSDAV_SSO_USERNAME=学号
+export WPSDAV_SSO_PASSWORD=密码
+```
+
+## 🧰 命令
+
+```text
+wpsdav serve     启动 WebDAV / 控制服务（默认读取 ./wpsdav.json）
+wpsdav doctor    只读自检：登录态、云盘列表、目录读取、下载直链
+wpsdav groups    列出当前账号可见的全部分组和团队文档
+wpsdav cookie    安装浏览器 Cookie（参数或 stdin）
+wpsdav login     通过指定 Provider 登录（目前内置 buaa）
+```
+
+通用选项：`-c, --config` 指定配置文件；`-p, --provider` 选择登录 Provider。
+配置里的相对路径按配置文件所在目录解析。
+
+## 🛠 运维
+
+- 健康检查：`curl -u user:pass http://127.0.0.1:8705/healthz?quota=1`
+- 刷新缓存：`curl -u user:pass -X POST http://127.0.0.1:8705/admin/refresh`
+- 更新 Cookie：直接覆盖 `cookie.txt`，或
+  `curl -u user:pass -X PUT --data-binary @cookie.txt http://127.0.0.1:8705/admin/cookie`
+- 远程部署：监听 `0.0.0.0` 时请置于 TLS 反向代理之后，Cookie 等价于完整账号权限。
+
+## ❗ 已知限制
 
 | 限制 | 说明 |
 |---|---|
-| mtime 只读 | 上传后修改时间为服务端时间；用 `--size-only` 比较 |
-| 无校验和 | 云端不提供可靠 checksum/ETag，`--checksum` 不可用 |
-| 点文件被拒 | `.DS_Store`、`.gitignore` 等无法上传，用过滤规则规避 |
-| 覆盖语义 | 同名上传走 `up_new_ver` 覆盖而不是生成 `name(1)` |
-| 最终一致 | 写操作后目录列表可能短暂滞后，wpsdav 会把写入项注入缓存 |
-| Cookie 过期 | cookie 模式无 refresh token；buaa 模式自动续期 |
-| 频率限制 | 403 `fileTaskDuplicated` 自动退避重试；批量操作避免连发 |
+| 修改时间只读 | 云端不提供设置 mtime 的接口，同步请用 `--size-only` |
+| 无校验和 | 不提供可靠的 checksum/ETag，`--checksum` 不可用 |
+| 点文件被拒 | `.gitignore`、`.DS_Store` 等无法上传，用过滤规则规避 |
+| 列表最终一致 | 写入后目录可能短暂滞后，wpsdav 会主动注入缓存 |
+| Cookie 会过期 | `cookie` 模式需重新从浏览器导出；`buaa` 模式可自动续期 |
+| 接口非官方 | 上游改版可能导致功能失效，请关注 Release |
 
-## 协议选择
+## 💡 常见问题
 
-当前实现是 WebDAV：WPS 本身是树形文件系统，WebDAV 的目录/文件/MOVE/COPY 语义
-与之一一对应，协议面小、正确性容易保证；且 GET 支持 302，天然满足“下载不落
-中间层”。S3 语义是扁平 key + 前缀模拟目录，需要目录标记、prefix/delimiter 分页、
-multipart 映射，且多数 S3 客户端不期望 GetObject 返回 302（下载只能代理）。
-若将来需要给非 rclone 的 S3 客户端使用，可在 `internal/kvfs` + `internal/wps`
-之上再加一个 S3 适配层——核心引擎与协议无关。
+**修改时间为什么总是不对？会不会导致 rclone 重复上传？**
+
+WPS 没有提供设置 mtime 的接口，云端保存的是“上传时间”，所以每次上传后文件的修改时间
+都会变成当时的时间。rclone 默认按“大小 + 修改时间”判断文件是否变化，这会导致本地文件
+每次都显得“不一样”，从而反复重传。
+
+解决办法是加 `--size-only`，让 rclone 只比较文件大小。挂载模式（`rclone mount`）本身
+不会主动重新上传任何文件，只有你写入或修改文件时才会触发上传，因此不存在“挂载导致
+反复上传”的问题；需要留意的是**同尺寸内容修改不会被识别**（备份场景通常可以接受）。
+
+**下载速度慢？** 确认 `download_mode` 为 `redirect`，并检查客户端是否能直连
+WPS 的 CDN 域名。
+
+**上传大文件失败？** 确认 `spool_dir` 所在磁盘有足够空间——上传需要先落盘计算哈希。
+
+**看不到刚上传的文件？** WPS 目录列表有短暂延迟。wpsdav 会缓存写入结果，稍等或
+调用 `/admin/refresh` 刷新。
+
+**团队文档库怎么挂载？** 运行 `wpsdav groups` 查看分组 ID，填到 `root_group_id`。
+企业接口另需将 `mode` 设为 `business`。
+
+**会不会影响我在网页版的使用？** 不会修改网页端数据；但重新登录可能使旧会话失效。
+删除操作进入 WPS 回收站，可恢复。
+
+## 🙏 致谢
+
+本项目的接口细节和协议实现参考了以下开源项目与实践，在此致谢：
+
+- [OpenList](https://github.com/OpenListTeam/OpenList) — WPS 驱动的文件操作与上传流程
+- [wps365-drive-gateway](https://github.com/sasonwong/wps365-drive-gateway) — 网关设计与 rclone 适配经验
+- 北航统一身份认证协议实现（comate-gateway 项目）
+
+## ⚠️ 免责声明
+
+本项目与金山办公、WPS、Kdocs 无任何关联，使用非官方接口，未获得官方授权。
+使用者需自行承担账号安全、服务条款合规与数据完整性风险。删除操作虽然进入回收站，
+但仍请做好备份。请遵守所在组织的相关规定与金山办公的服务条款。

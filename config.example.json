@@ -1,6 +1,6 @@
 {
   "mode": "personal",
-  "listen": "127.0.0.1:8080",
+  "listen": "127.0.0.1:8705",
   "dav_path": "/dav",
   "username": "wpsdav",
   "password": "change-me",

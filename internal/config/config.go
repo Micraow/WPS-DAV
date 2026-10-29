@@ -36,7 +36,7 @@ const (
 type Config struct {
 	Mode Mode `json:"mode"`
 
-	// Listen is the HTTP listen address, e.g. "127.0.0.1:8080".
+	// Listen is the HTTP listen address, e.g. "127.0.0.1:8705".
 	Listen string `json:"listen"`
 
 	// DAVPath is the mount point of the WebDAV handler, e.g. "/dav".
@@ -99,7 +99,7 @@ type SSOConfig struct {
 func Default() *Config {
 	return &Config{
 		Mode:            ModePersonal,
-		Listen:          "127.0.0.1:8080",
+		Listen:          "127.0.0.1:8705",
 		DAVPath:         "/dav",
 		CookieFile:      "cookie.txt",
 		DownloadMode:    DownloadRedirect,
