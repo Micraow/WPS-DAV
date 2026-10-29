@@ -35,6 +35,10 @@ type Client struct {
 	cookie  atomic.Value // string
 	company atomic.Int64 // discovered company id (business)
 	IsLogin LoginState
+
+	uploadRetries int
+	uploadBackoff time.Duration
+	endpoint      string // overrides the drive host in tests
 }
 
 func newTransport() *http.Transport {
@@ -70,8 +74,10 @@ func New(cfg *config.Config) *Client {
 			Timeout:   0, // uploads may take arbitrarily long
 			Transport: newTransport(),
 		},
-		mode: cfg.Mode,
-		ua:   cfg.CustomUA,
+		mode:          cfg.Mode,
+		ua:            cfg.CustomUA,
+		uploadRetries: cfg.UploadRetries,
+		uploadBackoff: time.Duration(cfg.UploadRetryBackoffSeconds * float64(time.Second)),
 	}
 	if c.ua == "" {
 		c.ua = defaultUA
@@ -116,6 +122,9 @@ func (c *Client) drivePrefix() string {
 }
 
 func (c *Client) driveURL(path string) string {
+	if c.endpoint != "" {
+		return c.endpoint + path
+	}
 	return c.driveHost() + c.drivePrefix() + path
 }
 
@@ -287,10 +296,10 @@ func (c *Client) getJSON(ctx context.Context, u string, out any) error {
 		if err == nil {
 			return nil
 		}
-		var httpErr *httpStatusError
-		if errors.As(err, &httpErr) {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
 			// A real HTTP response: only retry server-side failures.
-			if httpErr.Status < 500 && httpErr.Status != http.StatusTooManyRequests {
+			if apiErr.Status < 500 && apiErr.Status != http.StatusTooManyRequests {
 				return err
 			}
 		}
@@ -303,16 +312,6 @@ func (c *Client) getJSON(ctx context.Context, u string, out any) error {
 		}
 	}
 	return last
-}
-
-type httpStatusError struct {
-	Status int
-	Body   string
-	URL    string
-}
-
-func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("GET %s: http %d: %s", redact(e.URL), e.Status, e.Body)
 }
 
 func (c *Client) getJSONOnce(ctx context.Context, u string, out any) error {
@@ -331,7 +330,7 @@ func (c *Client) getJSONOnce(ctx context.Context, u string, out any) error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return &httpStatusError{Status: resp.StatusCode, Body: snippet(body), URL: u}
+		return &APIError{Op: "GET " + redact(u), Status: resp.StatusCode, Body: snippet(body)}
 	}
 	return json.Unmarshal(body, out)
 }
@@ -389,7 +388,7 @@ func (c *Client) doJSONResult(ctx context.Context, method, u string, body any) (
 			}
 			continue
 		}
-		last = fmt.Errorf("%s %s: http %d: result=%q msg=%q", method, redact(u), status, r.Result, r.Msg)
+		last = &APIError{Op: method + " " + redact(u), Status: status, Result: r.Result, Msg: r.Msg}
 		if status >= 500 || status == http.StatusTooManyRequests {
 			if !sleepCtx(ctx, backoff(attempt)) {
 				return apiResult{}, ctx.Err()

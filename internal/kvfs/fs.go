@@ -402,7 +402,7 @@ func ValidName(name string) error {
 		return os.ErrInvalid
 	}
 	if strings.HasPrefix(name, ".") {
-		return fmt.Errorf("wps: names starting with a dot are rejected by the server")
+		return fmt.Errorf("wps: names starting with a dot are rejected by the server: %w", os.ErrInvalid)
 	}
 	if strings.ContainsAny(name, "/\\") {
 		return os.ErrInvalid

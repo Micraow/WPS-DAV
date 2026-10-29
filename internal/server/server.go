@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,26 +40,23 @@ type Server struct {
 // New builds the HTTP server.
 func New(cfg *config.Config, client *wps.Client, tree *kvfs.Tree) *Server {
 	fs := &kvfs.FS{Tree: tree, Client: client, SpoolDir: cfg.SpoolDir}
-	return &Server{
+	s := &Server{
 		cfg:    cfg,
 		client: client,
 		tree:   tree,
 		fs:     fs,
-		dav: &webdav.Handler{
-			Prefix:     cfg.DAVPath,
-			FileSystem: fs,
-			LockSystem: webdav.NewMemLS(),
-			Logger: func(r *http.Request, err error) {
-				if err != nil {
-					log.Printf("dav %s %s: %v", r.Method, r.URL.Path, err)
-				}
-			},
-		},
 		bufPool: sync.Pool{New: func() any {
 			b := make([]byte, 64<<10)
 			return &b
 		}},
 	}
+	s.dav = &webdav.Handler{
+		Prefix:     cfg.DAVPath,
+		FileSystem: fs,
+		LockSystem: webdav.NewMemLS(),
+		Logger:     s.logDAV,
+	}
+	return s
 }
 
 // Handler returns the root HTTP handler.
@@ -89,6 +87,13 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleDAV(w http.ResponseWriter, r *http.Request) {
+	// x/net/webdav maps every upload failure to 405 and any non-ENOENT open
+	// failure to 404. Capture the real error and rewrite those two statuses
+	// so clients see the upstream failure (and retry 5xx/429).
+	rec := &davError{}
+	r = r.WithContext(context.WithValue(r.Context(), davErrorKey{}, rec))
+	w = &errorRewriter{ResponseWriter: w, rec: rec}
+
 	if strings.HasPrefix(r.URL.Path, s.cfg.DAVPath) {
 		p := strings.TrimPrefix(r.URL.Path, s.cfg.DAVPath)
 
@@ -107,7 +112,11 @@ func (s *Server) handleDAV(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "PROPFIND" && r.Header.Get("Depth") != "0" {
 			if node, err := s.tree.Stat(r.Context(), p); err == nil && node.IsDir {
 				if _, err := s.tree.List(r.Context(), p); err != nil {
-					http.Error(w, "listing: "+err.Error(), http.StatusBadGateway)
+					status := http.StatusBadGateway
+					if st, _, ok := upstreamStatus(err); ok {
+						status = st
+					}
+					http.Error(w, "listing: "+err.Error(), status)
 					return
 				}
 			}
@@ -121,6 +130,78 @@ func (s *Server) handleDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.dav.ServeHTTP(w, r)
+}
+
+type davErrorKey struct{}
+
+type davError struct{ err error }
+
+// logDAV keeps the diagnostic log and records the error on the request so
+// errorRewriter can map the status x/net/webdav chose.
+func (s *Server) logDAV(r *http.Request, err error) {
+	if err == nil {
+		return
+	}
+	log.Printf("dav %s %s: %v", r.Method, r.URL.Path, err)
+	if rec, ok := r.Context().Value(davErrorKey{}).(*davError); ok {
+		rec.err = err
+	}
+}
+
+// errorRewriter replaces the two catch-all statuses x/net/webdav emits with
+// the status the upstream error deserves, and writes the real message.
+type errorRewriter struct {
+	http.ResponseWriter
+	rec         *davError
+	wroteHeader bool
+	replaced    bool
+}
+
+func (w *errorRewriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	if w.rec != nil && w.rec.err != nil &&
+		(code == http.StatusNotFound || code == http.StatusMethodNotAllowed) {
+		if status, retryAfter, ok := upstreamStatus(w.rec.err); ok {
+			h := w.Header()
+			h.Set("Content-Type", "text/plain; charset=utf-8")
+			h.Del("Content-Length")
+			if retryAfter > 0 {
+				h.Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds()+0.5)))
+			}
+			w.ResponseWriter.WriteHeader(status)
+			fmt.Fprintf(w.ResponseWriter, "%s\n", w.rec.err)
+			w.replaced = true
+			return
+		}
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *errorRewriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.replaced {
+		return len(p), nil
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *errorRewriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// upstreamStatus layers filesystem sentinels over the wps classification.
+func upstreamStatus(err error) (int, time.Duration, bool) {
+	if errors.Is(err, kvfs.ErrReadOnly) {
+		return http.StatusForbidden, 0, true
+	}
+	return wps.HTTPStatus(err)
 }
 
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, src string) {
@@ -155,6 +236,10 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, src string) 
 			status = http.StatusNotFound
 		case errors.Is(err, kvfs.ErrReadOnly):
 			status = http.StatusForbidden
+		default:
+			if st, _, ok := upstreamStatus(err); ok {
+				status = st
+			}
 		}
 		http.Error(w, err.Error(), status)
 		return

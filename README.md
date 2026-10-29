@@ -162,6 +162,10 @@ rclone mount wpsdav: /mnt/wps \
 rclone sync /本地目录 wpsdav:备份目录 --size-only --filter "- .*" --transfers 8
 ```
 
+> 上面的 `rclone sync` 是单向镜像，会删除远端多余文件。如果需要“云端新增自动下载、
+> 云端删除保留本地、本地删除同步到云端”的非对称同步，可参考
+> [`examples/wpsdav-sync.py`](examples/wpsdav-sync.py)（[说明](examples/README.md)）。
+
 </details>
 
 ### 其他客户端
@@ -227,6 +231,11 @@ wpsdav cookie
 | `cache_ttl_seconds` | `60` | 目录缓存时间 |
 | `custom_ua` | — | 自定义 User-Agent |
 | `spool_dir` | 系统临时目录 | 上传缓冲目录 |
+| `upload_retries` | `5` | 上传阶段（create_update / 存储 PUT / commit）失败后的重试次数；`0` 关闭重试 |
+| `upload_retry_backoff_seconds` | `2` | 首次重试的等待秒数；之后按 2 倍递增，上限 30 秒，并带抖动 |
+
+上传遇到 WPS 限流或连接被上游掐断时，wpsdav 会先自行重试；重试次数用尽后仍失败，
+WebDAV 客户端会收到真实的 4xx/5xx（429 会带 `Retry-After`），而不是笼统的 405。
 
 SSO 密码也可以只放在环境变量里：
 
@@ -276,6 +285,9 @@ wpsdav version   查看版本信息
 | 列表最终一致 | 写入后目录可能短暂滞后，wpsdav 会主动注入缓存 |
 | Cookie 会过期 | `cookie` 模式需重新从浏览器导出；`buaa` 模式可自动续期 |
 | 接口非官方 | 上游改版可能导致功能失效，请关注 Release |
+
+> 另外，WPS 拒绝名字含 `\ : * ? " < > |` 的文件，并会去掉名字末尾的空格/点；
+> 0 字节文件上传会返回 `411 MissingContentLength`。同步前请改名或打包。
 
 ## 💡 常见问题
 
@@ -331,6 +343,9 @@ WPS 没有提供设置 mtime 的接口，云端保存的是“上传时间”，
 WPS 的 CDN 域名。
 
 **上传大文件失败？** 确认 `spool_dir` 所在磁盘有足够空间——上传需要先落盘计算哈希。
+WPS 的接口和对象存储偶发断连或限流，wpsdav 会按 `upload_retries` 自动重试；
+重试仍失败时，rclone 日志里会显示上游的真实错误（429 会附带 `Retry-After`），
+而不是笼统的 405。
 
 **看不到刚上传的文件？** WPS 目录列表有短暂延迟。wpsdav 会缓存写入结果，稍等或
 调用 `/admin/refresh` 刷新。

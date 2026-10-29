@@ -19,5 +19,7 @@
   "download_mode": "redirect",
   "cache_ttl_seconds": 60,
   "custom_ua": "",
-  "spool_dir": ""
+  "spool_dir": "",
+  "upload_retries": 5,
+  "upload_retry_backoff_seconds": 2
 }

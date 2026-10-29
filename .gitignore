@@ -10,3 +10,5 @@ packaging/aur/*/pkg/
 dist/
 packaging/aur/*/*.tar.gz
 cookie*.txt
+__pycache__/
+*.pyc

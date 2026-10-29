@@ -75,6 +75,16 @@ type Config struct {
 	// SpoolDir is where uploads are buffered (they must be hashed before the
 	// create_update call). Empty means the system temp dir.
 	SpoolDir string `json:"spool_dir"`
+
+	// UploadRetries is the number of additional attempts after a failed
+	// upload stage (create_update, store PUT, commit). The default is 5.
+	// Zero disables retries.
+	UploadRetries int `json:"upload_retries"`
+
+	// UploadRetryBackoffSeconds is the base delay between upload retries.
+	// Delays grow exponentially up to 30s and carry equal jitter. The default
+	// is 2 seconds. Zero disables the delay (but keeps the retries).
+	UploadRetryBackoffSeconds float64 `json:"upload_retry_backoff_seconds"`
 }
 
 // AuthConfig selects and configures the credential source.
@@ -103,6 +113,10 @@ func Default() *Config {
 		DAVPath:         "/dav",
 		DownloadMode:    DownloadRedirect,
 		CacheTTLSeconds: 60,
+
+		UploadRetries:             5,
+		UploadRetryBackoffSeconds: 2,
+
 		Auth: AuthConfig{
 			Mode: "cookie",
 			SSO: SSOConfig{
@@ -208,6 +222,12 @@ func (c *Config) Validate() error {
 	}
 	if c.CacheTTLSeconds <= 0 {
 		c.CacheTTLSeconds = 60
+	}
+	if c.UploadRetries < 0 {
+		return errors.New("upload_retries must be >= 0")
+	}
+	if c.UploadRetryBackoffSeconds < 0 {
+		return errors.New("upload_retry_backoff_seconds must be >= 0")
 	}
 	if c.Mode == ModeBusiness && c.RootGroupID == 0 {
 		return errors.New("business mode requires root_group_id (run `wpsdav groups` to list them)")

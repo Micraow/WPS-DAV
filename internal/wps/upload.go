@@ -9,10 +9,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// Upload retries cover transient upstream failures only. Delays grow
+// exponentially from upload_backoff, capped here so a dead host cannot stall
+// a transfer indefinitely.
+const maxUploadBackoff = 30 * time.Second
 
 // Hashes carries the digests the WPS upload API requires before bytes move.
 type Hashes struct {
@@ -49,18 +57,30 @@ type UploadOptions struct {
 	OverwriteFileID int64
 }
 
-// Upload performs the three-stage WPS upload:
+// Upload performs the three-stage WPS upload with retries:
 // create_update → PUT to the store URL → commit.
-// body must provide exactly Hashes.Size bytes.
-func (c *Client) Upload(ctx context.Context, opts UploadOptions, body io.Reader) (commitResp, error) {
+// body must provide exactly Hashes.Size bytes and must be seekable so each
+// store attempt can restart from offset zero.
+func (c *Client) Upload(ctx context.Context, opts UploadOptions, body io.ReadSeeker) (commitResp, error) {
 	var out commitResp
-	plan, err := c.createUpdate(ctx, opts)
-	if err != nil {
+	var plan uploadPlan
+	if err := c.retry(ctx, "create_update", func() error {
+		var err error
+		plan, err = c.createUpdate(ctx, opts)
+		return err
+	}); err != nil {
 		return out, err
 	}
 
-	stored, err := c.putStore(ctx, plan, opts.Hashes.Size, body)
-	if err != nil {
+	var stored storeResult
+	if err := c.retry(ctx, "store put", func() error {
+		if _, err := body.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind upload body: %w", err)
+		}
+		var err error
+		stored, err = c.putStore(ctx, plan, opts.Hashes.Size, body)
+		return err
+	}); err != nil {
 		return out, err
 	}
 
@@ -79,17 +99,84 @@ func (c *Client) Upload(ctx context.Context, opts UploadOptions, body io.Reader)
 		commitBody["file_id"] = opts.OverwriteFileID
 		commitBody["isUpNewVer"] = true
 	}
-	data, status, err := c.doJSON(ctx, "POST", c.driveURL("/api/v5/files/file"), commitBody)
-	if err != nil {
-		return out, fmt.Errorf("commit: %w", err)
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return out, fmt.Errorf("commit: decode: %w (http %d)", err, status)
-	}
-	if status != http.StatusOK || (out.Result != "" && out.Result != "ok") {
-		return out, fmt.Errorf("commit: http %d result=%q msg=%q", status, out.Result, out.Msg)
+	if err := c.retry(ctx, "commit", func() error {
+		var err error
+		out, err = c.commit(ctx, commitBody)
+		return err
+	}); err != nil {
+		return out, err
 	}
 	return out, nil
+}
+
+func (c *Client) commit(ctx context.Context, body map[string]any) (commitResp, error) {
+	var out commitResp
+	data, status, err := c.doJSON(ctx, "POST", c.driveURL("/api/v5/files/file"), body)
+	if err != nil {
+		return out, transportError("commit", "", err)
+	}
+	decodeErr := json.Unmarshal(data, &out)
+	if status != http.StatusOK {
+		ae := &APIError{Op: "commit", Status: status, Result: out.Result, Msg: out.Msg}
+		if decodeErr != nil {
+			ae.Body = snippet(data)
+		}
+		return out, ae
+	}
+	if decodeErr != nil {
+		return out, &APIError{Op: "commit", Status: status, Body: snippet(data),
+			Err: fmt.Errorf("decode: %w", decodeErr)}
+	}
+	if out.Result != "" && out.Result != "ok" {
+		return out, &APIError{Op: "commit", Status: status, Result: out.Result, Msg: out.Msg}
+	}
+	return out, nil
+}
+
+// retry runs fn and repeats transient failures with exponential, jittered
+// backoff. c.uploadRetries is the number of attempts after the first one.
+func (c *Client) retry(ctx context.Context, op string, fn func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if attempt >= c.uploadRetries || !retryable(err) {
+			return err
+		}
+		delay := c.retryDelay(attempt, err)
+		log.Printf("wps: %s retry %d/%d in %s: %v", op, attempt+1,
+			c.uploadRetries, delay.Round(time.Millisecond), err)
+		if !sleepCtx(ctx, delay) {
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Client) retryDelay(attempt int, err error) time.Duration {
+	base := c.uploadBackoff
+	if base <= 0 {
+		return 0
+	}
+	d := base
+	for i := 0; i < attempt && d < maxUploadBackoff; i++ {
+		d *= 2
+	}
+	if isRateLimited(err) {
+		// WPS asks us to back off explicitly; doubling the wait costs little
+		// and avoids burning a retry on the same throttle window.
+		d *= 2
+	}
+	if d > maxUploadBackoff {
+		d = maxUploadBackoff
+	}
+	// Equal jitter: half fixed, half random, so parallel transfers do not
+	// retry in lockstep and hammer an already-struggling host.
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + time.Duration(rand.Int63n(int64(half)+1))
 }
 
 func (c *Client) createUpdate(ctx context.Context, opts UploadOptions) (uploadPlan, error) {
@@ -110,16 +197,27 @@ func (c *Client) createUpdate(ctx context.Context, opts UploadOptions) (uploadPl
 	}
 	data, status, err := c.doJSON(ctx, "PUT", c.driveURL("/api/v5/files/upload/create_update"), body)
 	if err != nil {
-		return plan, fmt.Errorf("create_update: %w", err)
+		return plan, transportError("create_update", "", err)
 	}
-	if err := json.Unmarshal(data, &plan); err != nil {
-		return plan, fmt.Errorf("create_update: decode: %w (http %d)", err, status)
+	decodeErr := json.Unmarshal(data, &plan)
+	if status != http.StatusOK {
+		ae := &APIError{Op: "create_update", Status: status,
+			Result: plan.Result, Msg: plan.Msg}
+		if decodeErr != nil {
+			ae.Body = snippet(data)
+		}
+		return plan, ae
 	}
-	if status != http.StatusOK || (plan.Result != "" && plan.Result != "ok") {
-		return plan, fmt.Errorf("create_update: http %d result=%q msg=%q", status, plan.Result, plan.Msg)
+	if decodeErr != nil {
+		return plan, &APIError{Op: "create_update", Status: status, Body: snippet(data),
+			Err: fmt.Errorf("decode: %w", decodeErr)}
+	}
+	if plan.Result != "" && plan.Result != "ok" {
+		return plan, &APIError{Op: "create_update", Status: status,
+			Result: plan.Result, Msg: plan.Msg}
 	}
 	if plan.URL == "" {
-		return plan, fmt.Errorf("create_update: response has no upload url")
+		return plan, &APIError{Op: "create_update", Err: fmt.Errorf("response has no upload url")}
 	}
 	return plan, nil
 }
@@ -163,6 +261,16 @@ func (c *Client) putStore(ctx context.Context, plan uploadPlan, size int64, body
 	if err != nil {
 		return storeResult{}, err
 	}
+	if rs, ok := reqBody.(io.ReadSeeker); ok {
+		// Let net/http replay the body when it retries a request on a stale
+		// HTTP/2 connection (server GOAWAY) instead of failing the upload.
+		req.GetBody = func() (io.ReadCloser, error) {
+			if _, err := rs.Seek(0, io.SeekStart); err != nil {
+				return nil, err
+			}
+			return io.NopCloser(rs), nil
+		}
+	}
 	for k, v := range plan.Request.Headers {
 		req.Header.Set(k, v)
 	}
@@ -175,7 +283,7 @@ func (c *Client) putStore(ctx context.Context, plan uploadPlan, size int64, body
 	// Reuse the shared no-timeout store client; context bounds the transfer.
 	resp, err := c.store.Do(req)
 	if err != nil {
-		return storeResult{}, fmt.Errorf("store put: %w", err)
+		return storeResult{}, transportError("store put", plan.URL, err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -188,7 +296,8 @@ func (c *Client) putStore(ctx context.Context, plan uploadPlan, size int64, body
 		}
 	}
 	if !ok {
-		return storeResult{}, fmt.Errorf("store put: http %d: %s", resp.StatusCode, snippet(respBody))
+		return storeResult{}, &APIError{Op: "store put", Status: resp.StatusCode,
+			Body: snippet(respBody), RetryAfter: parseRetryAfter(resp.Header)}
 	}
 
 	var pr uploadPutResp
@@ -216,7 +325,8 @@ func (c *Client) putStore(ctx context.Context, plan uploadPlan, size int64, body
 		res.SHA1 = res.Key
 	}
 	if res.Key == "" {
-		return storeResult{}, fmt.Errorf("store put: could not determine object key")
+		return storeResult{}, &APIError{Op: "store put", Status: resp.StatusCode,
+			Msg: "could not determine object key", Body: snippet(respBody)}
 	}
 	return res, nil
 }
