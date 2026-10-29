@@ -256,7 +256,14 @@ wpsdav version   查看版本信息
 - 刷新缓存：`curl -u user:pass -X POST http://127.0.0.1:8705/admin/refresh`
 - 更新 Cookie：直接覆盖 `cookie.txt`，或
   `curl -u user:pass -X PUT --data-binary @cookie.txt http://127.0.0.1:8705/admin/cookie`
-- 用户级服务：安装包（0.1.1+）自带 systemd 用户单元，`systemctl --user enable --now wpsdav` 即可开机自启（配置需先用 `wpsdav init` 生成）。
+- 用户级服务：安装包（0.1.1+）自带 systemd **用户单元**（不是系统单元）：
+  ```bash
+  systemctl --user daemon-reload
+  systemctl --user enable --now wpsdav
+  systemctl --user status wpsdav
+  ```
+  配置需先用 `wpsdav init` 生成。要让服务在注销后继续运行，执行一次
+  `loginctl enable-linger $USER`。
 - 远程部署：监听 `0.0.0.0` 时请置于 TLS 反向代理之后，Cookie 等价于完整账号权限。
 
 ## ❗ 已知限制
@@ -271,6 +278,18 @@ wpsdav version   查看版本信息
 | 接口非官方 | 上游改版可能导致功能失效，请关注 Release |
 
 ## 💡 常见问题
+
+**`sudo systemctl start wpsdav` 报 “Unit wpsdav.service not found”？**
+
+它是 **systemd 用户单元**，只属于当前用户，系统级 `systemctl` 看不到。正确用法：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now wpsdav
+systemctl --user status wpsdav
+```
+
+`sudo systemctl ...` 只管理系统单元；不要用 sudo 启动用户单元。
 
 **长期挂载会耗电 / 变慢吗？**
 
