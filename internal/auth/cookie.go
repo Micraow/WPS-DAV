@@ -2,10 +2,11 @@ package auth
 
 import (
 	"context"
-	"log"
 	"os"
 	"strings"
 	"time"
+
+	"wpsdav/internal/logging"
 )
 
 // CookieProvider serves a cookie header maintained by hand (browser export).
@@ -51,7 +52,7 @@ func (p *CookieProvider) Run(ctx context.Context, notify func(string)) {
 			return
 		}
 		lastMod, lastSize = fi.ModTime(), fi.Size()
-		log.Printf("cookie reloaded from %s (%d bytes)", p.path, len(cookie))
+		logging.Infof("cookie reloaded from %s (%d bytes)", p.path, len(cookie))
 		notify(cookie)
 	}
 	load()

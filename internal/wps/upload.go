@@ -9,12 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
+
+	"wpsdav/internal/logging"
 )
 
 // Upload retries cover transient upstream failures only. Delays grow
@@ -145,7 +146,7 @@ func (c *Client) retry(ctx context.Context, op string, fn func() error) error {
 			return err
 		}
 		delay := c.retryDelay(attempt, err)
-		log.Printf("wps: %s retry %d/%d in %s: %v", op, attempt+1,
+		logging.Warnf("%s retry %d/%d in %s: %v", op, attempt+1,
 			c.uploadRetries, delay.Round(time.Millisecond), err)
 		if !sleepCtx(ctx, delay) {
 			return ctx.Err()

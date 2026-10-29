@@ -231,6 +231,7 @@ wpsdav cookie
 | `cache_ttl_seconds` | `60` | 目录缓存时间 |
 | `custom_ua` | — | 自定义 User-Agent |
 | `spool_dir` | 系统临时目录 | 上传缓冲目录 |
+| `log_file` | 空（仅 stderr） | 追加式日志文件；相对路径按配置目录解析 |
 | `upload_retries` | `5` | 上传阶段（create_update / 存储 PUT / commit）失败后的重试次数；`0` 关闭重试 |
 | `upload_retry_backoff_seconds` | `2` | 首次重试的等待秒数；之后按 2 倍递增，上限 30 秒，并带抖动 |
 
@@ -274,6 +275,15 @@ wpsdav version   查看版本信息
   配置需先用 `wpsdav init` 生成。要让服务在注销后继续运行，执行一次
   `loginctl enable-linger $USER`。
 - 远程部署：监听 `0.0.0.0` 时请置于 TLS 反向代理之后，Cookie 等价于完整账号权限。
+
+## 📜 日志
+
+- **systemd 运行**：日志走 stderr → journald，这是 systemd 服务的标准做法，不需要
+  也不应该写 `/var/log`。查看：`journalctl --user -u wpsdav -f`。
+- **文件日志**：在配置里设置 `"log_file"`（如 `~/.local/state/wpsdav/wpsdav.log`），
+  追加写入、权限 0600；写 `/var/log` 时请自行配置 logrotate。
+- 终端下日志带彩色级别标签（`warning:` 黄、`error:` 红），文件里始终是纯文本。
+- `NO_COLOR=1` 或 `TERM=dumb` 关闭所有颜色。
 
 ## ❗ 已知限制
 

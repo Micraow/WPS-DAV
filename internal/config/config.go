@@ -76,6 +76,10 @@ type Config struct {
 	// create_update call). Empty means the system temp dir.
 	SpoolDir string `json:"spool_dir"`
 
+	// LogFile optionally tees logs to an append-only file. Empty means stderr
+	// only (journald when running under systemd).
+	LogFile string `json:"log_file"`
+
 	// UploadRetries is the number of additional attempts after a failed
 	// upload stage (create_update, store PUT, commit). The default is 5.
 	// Zero disables retries.
@@ -193,6 +197,9 @@ func (c *Config) resolvePaths(configPath string) {
 	}
 	if c.SpoolDir != "" && !filepath.IsAbs(c.SpoolDir) {
 		c.SpoolDir = filepath.Join(dir, c.SpoolDir)
+	}
+	if c.LogFile != "" && !filepath.IsAbs(c.LogFile) {
+		c.LogFile = filepath.Join(dir, c.LogFile)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +21,7 @@ import (
 
 	"wpsdav/internal/config"
 	"wpsdav/internal/kvfs"
-	"wpsdav/internal/ui"
+	"wpsdav/internal/logging"
 	"wpsdav/internal/wps"
 )
 
@@ -142,7 +141,7 @@ func (s *Server) logDAV(r *http.Request, err error) {
 	if err == nil {
 		return
 	}
-	log.Printf("dav %s %s: %v", r.Method, r.URL.Path, err)
+	logging.Infof("dav %s %s: %v", r.Method, r.URL.Path, err)
 	if rec, ok := r.Context().Value(davErrorKey{}).(*davError); ok {
 		rec.err = err
 	}
@@ -299,7 +298,7 @@ func (s *Server) proxyDownload(w http.ResponseWriter, r *http.Request, link stri
 	defer s.bufPool.Put(bp)
 	start := time.Now()
 	n, _ := io.CopyBuffer(w, resp.Body, *bp)
-	log.Printf("%s", ui.TransferLine("download", r.URL.Path, n, time.Since(start)))
+	logging.Transfer("download", r.URL.Path, n, time.Since(start))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

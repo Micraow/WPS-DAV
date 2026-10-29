@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"log"
 	"mime"
 	"os"
 	"path"
@@ -20,6 +19,7 @@ import (
 
 	"golang.org/x/net/webdav"
 
+	"wpsdav/internal/logging"
 	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
 )
@@ -363,10 +363,10 @@ func (u *uploadFile) Close() error {
 	}, u.tmp)
 	fullPath := path.Join(u.dirPath, u.name)
 	if err != nil {
-		log.Printf("%s upload failed: %s: %v", ui.Tag("upload"), fullPath, err)
+		logging.Errorf("%s upload failed: %s: %v", ui.Tag("upload"), fullPath, err)
 		return err
 	}
-	log.Printf("%s", ui.TransferLine("upload", fullPath, hashes.Size, time.Since(u.start)))
+	logging.Transfer("upload", fullPath, hashes.Size, time.Since(u.start))
 	newID := resp.ID
 	if newID == 0 {
 		newID = u.overwriteID

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -26,6 +25,7 @@ import (
 	"wpsdav/internal/auth"
 	"wpsdav/internal/config"
 	"wpsdav/internal/kvfs"
+	"wpsdav/internal/logging"
 	"wpsdav/internal/server"
 	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
@@ -37,8 +37,6 @@ const envConfigFile = "WPSDAV_CONFIG"
 var version = "dev"
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("wpsdav: ")
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -110,14 +108,17 @@ func loadConfig(fs *pflag.FlagSet) *config.Config {
 	cfgFile := configPath(*path)
 	if cfgFile == "" {
 		searched := append([]string{"$" + envConfigFile}, config.SearchPaths()...)
-		log.Fatalf("no config found (searched: %s)\n  create one with `wpsdav init`, or pass --config PATH",
+		logging.Fatalf("no config found (searched: %s)\n  create one with `wpsdav init`, or pass --config PATH",
 			strings.Join(searched, ", "))
 	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
-		log.Fatalf("config %s: %v", cfgFile, err)
+		logging.Fatalf("config %s: %v", cfgFile, err)
 	}
-	log.Printf("config: %s", ui.Dim(cfgFile))
+	if ferr := logging.SetFile(cfg.LogFile); ferr != nil {
+		logging.Warnf("log file disabled: %v", ferr)
+	}
+	logging.Infof("config: %s", ui.Dim(cfgFile))
 	return cfg
 }
 
@@ -134,7 +135,7 @@ func newClient(cfg *config.Config) *wps.Client {
 
 func persistCookie(cfg *config.Config, header string) {
 	if err := os.WriteFile(cfg.CookieFile, []byte(header+"\n"), 0o600); err != nil {
-		log.Printf("warning: persist cookie: %v", err)
+		logging.Warnf("persist cookie: %v", err)
 	}
 }
 
@@ -145,7 +146,7 @@ func seedProvider(prov auth.Provider, cookie string) {
 		return
 	}
 	if s, ok := prov.(auth.Seedable); ok && s.Seed(cookie) {
-		log.Printf("provider %s seeded with cached cookie", prov.Name())
+		logging.Infof("provider %s seeded with cached cookie", prov.Name())
 	}
 }
 
@@ -169,7 +170,7 @@ func ensureCredentials(ctx context.Context, cfg *config.Config, prov auth.Provid
 		if st, err := client.CheckLogin(ctx); err == nil {
 			return st, nil
 		}
-		log.Printf("stored cookie rejected, renewing via %s", prov.Name())
+		logging.Infof("stored cookie rejected, renewing via %s", prov.Name())
 	}
 	cookie, err := prov.Renew(ctx)
 	if err != nil {
@@ -202,7 +203,7 @@ func superviseCredentials(ctx context.Context, cfg *config.Config, prov auth.Pro
 		cancel()
 		if rerr != nil {
 			if time.Since(lastLog) > 10*time.Minute {
-				log.Printf("credentials invalid (%v); renew via %s unavailable: %v", err, prov.Name(), rerr)
+				logging.Infof("credentials invalid (%v); renew via %s unavailable: %v", err, prov.Name(), rerr)
 				lastLog = time.Now()
 			}
 			continue
@@ -210,7 +211,7 @@ func superviseCredentials(ctx context.Context, cfg *config.Config, prov auth.Pro
 		client.SetCookie(cookie)
 		persistCookie(cfg, cookie)
 		tree.ForcedRefresh()
-		log.Printf("credentials renewed via %s", prov.Name())
+		logging.Infof("credentials renewed via %s", prov.Name())
 	}
 }
 
@@ -226,7 +227,7 @@ func cmdInit(args []string) {
 	var cfgPath, cookiePath string
 	if *system {
 		if os.Geteuid() != 0 {
-			log.Fatalf("--system requires root")
+			logging.Fatalf("--system requires root")
 		}
 		cfgPath = "/etc/wpsdav/config.json"
 		cookiePath = "/var/lib/wpsdav/cookie.txt"
@@ -235,12 +236,12 @@ func cmdInit(args []string) {
 		cookiePath = filepath.Join(config.UserStateDir(), "wpsdav", "cookie.txt")
 	}
 	if _, err := os.Stat(cfgPath); err == nil && !*force {
-		log.Fatalf("%s already exists (use --force to overwrite)", cfgPath)
+		logging.Fatalf("%s already exists (use --force to overwrite)", cfgPath)
 	}
 
 	password, err := randomPassword(20)
 	if err != nil {
-		log.Fatalf("generate password: %v", err)
+		logging.Fatalf("generate password: %v", err)
 	}
 	cfg := config.Default()
 	cfg.Listen = *listen
@@ -252,15 +253,15 @@ func cmdInit(args []string) {
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		log.Fatalf("encode config: %v", err)
+		logging.Fatalf("encode config: %v", err)
 	}
 	for _, dir := range []string{filepath.Dir(cfgPath), filepath.Dir(cookiePath)} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			log.Fatalf("create %s: %v", dir, err)
+			logging.Fatalf("create %s: %v", dir, err)
 		}
 	}
 	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o600); err != nil {
-		log.Fatalf("write %s: %v", cfgPath, err)
+		logging.Fatalf("write %s: %v", cfgPath, err)
 	}
 
 	fmt.Printf("%s %s (0600)\n", ui.Bold("config written:"), cfgPath)
@@ -290,13 +291,13 @@ func cmdServe(args []string) {
 	fs := pflag.NewFlagSet("serve", pflag.ExitOnError)
 	cfg := loadConfig(fs)
 	if cfg.Username == "" || cfg.Password == "" {
-		log.Fatalf("username and password are required in the config (the DAV endpoint must not be open)")
+		logging.Fatalf("username and password are required in the config (the DAV endpoint must not be open)")
 	}
 
 	client := newClient(cfg)
 	prov, err := auth.New(cfg)
 	if err != nil {
-		log.Fatalf("auth: %v", err)
+		logging.Fatalf("auth: %v", err)
 	}
 	seedProvider(prov, client.Cookie())
 
@@ -306,15 +307,15 @@ func cmdServe(args []string) {
 		if errors.Is(err, auth.ErrManual) || errors.Is(err, auth.ErrNoCredentials) {
 			cancel()
 			if client.Cookie() == "" {
-				log.Fatalf("no usable credentials: %v\n  run `wpsdav cookie` (manual) or `wpsdav login -provider buaa` (SSO)", err)
+				logging.Fatalf("no usable credentials: %v\n  run `wpsdav cookie` (manual) or `wpsdav login -provider buaa` (SSO)", err)
 			}
-			log.Printf("warning: credentials check failed (%v); serving with the cached cookie until it expires", err)
+			logging.Warnf("credentials check failed (%v); serving with the cached cookie until it expires", err)
 		} else {
 			cancel()
-			log.Fatalf("authentication failed: %v", err)
+			logging.Fatalf("authentication failed: %v", err)
 		}
 	} else {
-		log.Printf("logged in: userid=%d company=%d", st.UserID, st.CurrentCompanyID)
+		logging.Infof("logged in: userid=%d company=%d", st.UserID, st.CurrentCompanyID)
 	}
 
 	rootID := cfg.RootGroupID
@@ -326,11 +327,11 @@ func cmdServe(args []string) {
 		}
 		if err != nil {
 			cancel()
-			log.Fatalf("resolve root group: %v", err)
+			logging.Fatalf("resolve root group: %v", err)
 		}
 	}
 	cancel()
-	log.Printf("mode=%s root_group=%d company=%d auth=%s", cfg.Mode, rootID, client.CompanyID(), prov.Name())
+	logging.Infof("mode=%s root_group=%d company=%d auth=%s", cfg.Mode, rootID, client.CompanyID(), prov.Name())
 
 	tree := kvfs.NewTree(client, rootID, time.Duration(cfg.CacheTTLSeconds)*time.Second)
 	srv := server.New(cfg, client, tree)
@@ -354,9 +355,9 @@ func cmdServe(args []string) {
 	}
 
 	go func() {
-		log.Printf("listening on %s (dav path %s, download mode %s)", ui.Cyan(cfg.Listen), cfg.DAVPath, cfg.DownloadMode)
+		logging.Infof("listening on %s (dav path %s, download mode %s)", ui.Cyan(cfg.Listen), cfg.DAVPath, cfg.DownloadMode)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+			logging.Fatalf("listen: %v", err)
 		}
 	}()
 
@@ -367,7 +368,7 @@ func cmdServe(args []string) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
-	log.Printf("bye")
+	logging.Infof("bye")
 }
 
 func cmdLogin(args []string) {
@@ -382,7 +383,7 @@ func cmdLogin(args []string) {
 		mode = "cookie"
 	}
 	if mode != "buaa" {
-		log.Fatalf("provider %q does not support login; supported: buaa (北航统一身份认证); cookie credentials are installed with `wpsdav cookie`", mode)
+		logging.Fatalf("provider %q does not support login; supported: buaa (北航统一身份认证); cookie credentials are installed with `wpsdav cookie`", mode)
 	}
 	user, pass := ssoCredentials(cfg)
 	if rest := fs.Args(); len(rest) > 0 {
@@ -399,12 +400,12 @@ func cmdLogin(args []string) {
 		pw, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if err != nil {
-			log.Fatalf("read password: %v", err)
+			logging.Fatalf("read password: %v", err)
 		}
 		pass = string(pw)
 	}
 	if user == "" || pass == "" {
-		log.Fatalf("missing credentials: pass 学号 as an argument, or set sso.username/password in config, or %s/%s",
+		logging.Fatalf("missing credentials: pass 学号 as an argument, or set sso.username/password in config, or %s/%s",
 			"WPSDAV_SSO_USERNAME", "WPSDAV_SSO_PASSWORD")
 	}
 
@@ -413,7 +414,7 @@ func cmdLogin(args []string) {
 	defer cancel()
 	cookie, err := prov.Renew(ctx)
 	if err != nil {
-		log.Fatalf("login via %s failed: %v", prov.Name(), err)
+		logging.Fatalf("login via %s failed: %v", prov.Name(), err)
 	}
 	persistCookie(cfg, cookie)
 	fmt.Printf("login via %s ok; cookie written to %s\n", prov.Name(), cfg.CookieFile)
@@ -425,18 +426,18 @@ func cmdGroups(args []string) {
 	client := newClient(cfg)
 	prov, err := auth.New(cfg)
 	if err != nil {
-		log.Fatalf("auth: %v", err)
+		logging.Fatalf("auth: %v", err)
 	}
 	seedProvider(prov, client.Cookie())
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	if _, err := ensureCredentials(ctx, cfg, prov, client); err != nil {
-		log.Fatalf("no valid credentials: %v", err)
+		logging.Fatalf("no valid credentials: %v", err)
 	}
 	groups, err := client.Groups(ctx)
 	if err != nil {
-		log.Fatalf("groups: %v", err)
+		logging.Fatalf("groups: %v", err)
 	}
 	seen := make(map[int64]bool)
 	if cfg.Mode == config.ModePersonal {
@@ -460,16 +461,16 @@ func cmdCookie(args []string) {
 	if value == "" {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			log.Fatalf("read stdin: %v", err)
+			logging.Fatalf("read stdin: %v", err)
 		}
 		value = string(data)
 	}
 	value = strings.TrimSpace(value)
 	if value == "" {
-		log.Fatalf("no cookie provided (argument or stdin)")
+		logging.Fatalf("no cookie provided (argument or stdin)")
 	}
 	if err := os.WriteFile(cfg.CookieFile, []byte(value+"\n"), 0o600); err != nil {
-		log.Fatalf("write %s: %v", cfg.CookieFile, err)
+		logging.Fatalf("write %s: %v", cfg.CookieFile, err)
 	}
 	fmt.Printf("cookie written to %s (%d bytes)\n", cfg.CookieFile, len(value))
 }
@@ -480,7 +481,7 @@ func cmdDoctor(args []string) {
 	client := newClient(cfg)
 	prov, err := auth.New(cfg)
 	if err != nil {
-		log.Fatalf("auth: %v", err)
+		logging.Fatalf("auth: %v", err)
 	}
 	seedProvider(prov, client.Cookie())
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

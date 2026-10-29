@@ -2,10 +2,10 @@ package auth
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
+	"wpsdav/internal/logging"
 	"wpsdav/internal/sso"
 )
 
@@ -54,7 +54,7 @@ func (p *BuaaProvider) Renew(ctx context.Context) (string, error) {
 	if p.mgr.Session() != nil {
 		if sess, err := p.mgr.Refresh(ctx); err == nil {
 			p.setCurrent(sess.CookieHeader())
-			log.Printf("SSO session refreshed (expires_in=%ds)", sess.ExpiresIn)
+			logging.Infof("SSO session refreshed (expires_in=%ds)", sess.ExpiresIn)
 			return sess.CookieHeader(), nil
 		}
 	}
@@ -66,14 +66,14 @@ func (p *BuaaProvider) Renew(ctx context.Context) (string, error) {
 		return "", err
 	}
 	p.setCurrent(sess.CookieHeader())
-	log.Printf("SSO login ok: %s (uid=%d company=%d)", sess.Nickname, sess.UID, sess.CompanyID)
+	logging.Infof("SSO login ok: %s (uid=%d company=%d)", sess.Nickname, sess.UID, sess.CompanyID)
 	return sess.CookieHeader(), nil
 }
 
 // Run implements Provider: refresh on an interval, re-login on failure.
 func (p *BuaaProvider) Run(ctx context.Context, notify func(string)) {
 	if !p.hasCred && p.mgr.Session() == nil {
-		log.Printf("buaa provider has neither credentials nor a cached session; background refresh disabled")
+		logging.Infof("buaa provider has neither credentials nor a cached session; background refresh disabled")
 		<-ctx.Done()
 		return
 	}
@@ -89,11 +89,11 @@ func (p *BuaaProvider) Run(ctx context.Context, notify func(string)) {
 		sess, err := p.mgr.Refresh(rctx)
 		cancel()
 		if err != nil {
-			log.Printf("SSO refresh failed: %v", err)
+			logging.Infof("SSO refresh failed: %v", err)
 			continue
 		}
 		p.setCurrent(sess.CookieHeader())
-		log.Printf("SSO session refreshed (expires_in=%ds)", sess.ExpiresIn)
+		logging.Infof("SSO session refreshed (expires_in=%ds)", sess.ExpiresIn)
 		notify(sess.CookieHeader())
 	}
 }
