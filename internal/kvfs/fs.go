@@ -30,6 +30,8 @@ type FS struct {
 	Client *wps.Client
 	// Uploader stores file bytes. Nil means the private cookie backend.
 	Uploader Uploader
+	// SkipIdentical skips uploads whose target already has the same SHA-1.
+	SkipIdentical bool
 	// ReadOnly blocks mkdir/put/delete/move/copy.
 	ReadOnly bool
 	// SpoolDir is where PUT bodies are buffered for hashing.
@@ -361,6 +363,21 @@ func (u *uploadFile) Close() error {
 		MD5:    hex.EncodeToString(u.md5.Sum(nil)),
 		Size:   u.written,
 	}
+	fullPath := path.Join(u.dirPath, u.name)
+	if u.fs.SkipIdentical && u.overwriteID != 0 && hashes.SHA1 != "" {
+		if remote, cerr := u.fs.Client.SHA1(u.ctx, u.parent.GroupID, u.overwriteID); cerr == nil && strings.EqualFold(remote, hashes.SHA1) {
+			logging.Infof("%s skip identical file: %s", ui.Tag("upload"), fullPath)
+			u.fs.Tree.Seed(u.dirPath, &Node{
+				Name:     u.name,
+				ID:       u.overwriteID,
+				GroupID:  u.parent.GroupID,
+				ParentID: u.parent.ID,
+				Size:     hashes.Size,
+				Mtime:    time.Now(),
+			})
+			return nil
+		}
+	}
 	uploader := u.fs.Uploader
 	if uploader == nil {
 		uploader = &PrivateUploader{Client: u.fs.Client}
@@ -381,7 +398,6 @@ func (u *uploadFile) Close() error {
 		OverwriteFileID: u.overwriteID,
 		Overwrite:       u.overwriteID != 0,
 	}, u.tmp)
-	fullPath := path.Join(u.dirPath, u.name)
 	if err != nil {
 		logging.Errorf("%s upload failed: %s: %v", ui.Tag("upload"), fullPath, err)
 		return err

@@ -491,3 +491,29 @@ func redact(u string) string {
 	}
 	return u
 }
+
+// checksumResp is the download-info response when checksums are requested.
+type checksumResp struct {
+	Result    string            `json:"result"`
+	Msg       string            `json:"msg"`
+	Fsize     int64             `json:"fsize"`
+	Checksums map[string]string `json:"checksums"`
+}
+
+// SHA1 returns the stored SHA-1 for a file, used to skip identical uploads.
+func (c *Client) SHA1(ctx context.Context, groupID, fileID int64) (string, error) {
+	u := fmt.Sprintf("%s/download?support_checksums=sha1",
+		c.driveURL(fmt.Sprintf("/api/v5/groups/%d/files/%d", groupID, fileID)))
+	var r checksumResp
+	if err := c.getJSON(ctx, u, &r); err != nil {
+		return "", err
+	}
+	if r.Result != "" && r.Result != "ok" {
+		return "", fmt.Errorf("checksum: %s", r.Msg)
+	}
+	sum := strings.ToLower(strings.TrimSpace(r.Checksums["sha1"]))
+	if sum == "" {
+		return "", fmt.Errorf("checksum: sha1 missing")
+	}
+	return sum, nil
+}

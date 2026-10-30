@@ -116,6 +116,14 @@ type UploadConfig struct {
 
 	// Fallback retries with the private backend when v7 fails (default true).
 	Fallback bool `json:"fallback"`
+
+	// MultipartThresholdBytes enables multipart uploads at or above this size.
+	// Zero disables multipart. Default 64 MiB.
+	MultipartThresholdBytes int64 `json:"multipart_threshold_bytes"`
+
+	// SkipIdentical skips the upload when the target file already has the
+	// same SHA-1 (default true).
+	SkipIdentical bool `json:"skip_identical"`
 }
 
 // AuthConfig selects and configures the credential source.
@@ -149,9 +157,11 @@ func Default() *Config {
 		UploadRetryBackoffSeconds: 2,
 
 		Upload: UploadConfig{
-			Backend:         UploadPrivate,
-			AgentAPIKeyFile: "agent.key",
-			Fallback:        true,
+			Backend:                 UploadPrivate,
+			AgentAPIKeyFile:         "agent.key",
+			Fallback:                true,
+			MultipartThresholdBytes: 64 << 20,
+			SkipIdentical:           true,
 		},
 
 		Auth: AuthConfig{
@@ -275,6 +285,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Mode == ModeBusiness && c.RootGroupID == 0 {
 		return errors.New("business mode requires root_group_id (run `wpsdav groups` to list them)")
+	}
+	if c.Upload.MultipartThresholdBytes < 0 {
+		return errors.New("upload.multipart_threshold_bytes must be >= 0")
 	}
 	switch c.Upload.Backend {
 	case "":

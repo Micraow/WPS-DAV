@@ -301,7 +301,7 @@ func (a *app) uploadMenu(ctx context.Context) {
 	a.clear()
 	fmt.Println(ui.Bold("上传方式"))
 	fmt.Println("  private  使用 Cookie 私有接口（默认，兼容性最好）")
-	fmt.Println("  v7       使用官方 API（需要 Agent Key，失败自动回退）")
+	fmt.Println("  v7       官方 API（Agent Key；大文件分块，同哈希跳过，失败回退）")
 	fmt.Println()
 	fmt.Printf("当前：%s\n\n", cfg.Upload.Backend)
 	fmt.Println("  1  private")

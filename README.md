@@ -196,13 +196,21 @@ rclone sync /本地目录 wpsdav:备份目录 --size-only --filter "- .*" --tran
 "upload": {
   "backend": "v7",
   "agent_api_key_file": "agent.key",
-  "fallback": true
+  "fallback": true,
+  "multipart_threshold_bytes": 67108864,
+  "skip_identical": true
 }
 ```
 
 Agent Key 在 `account.wps.cn → 个人中心 → AI 服务 → 我的 AI Agent` 创建，格式
 `apik:<id>.<secret>`。**v7 只影响上传**：下载、列目录、WebDAV 语义仍走 Cookie，
 预签名链接的 302 直连保持不变。
+
+- **分块上传**：超过 `multipart_threshold_bytes` 的文件自动走官方分块接口，按服务端
+  返回的 `part_size` 顺序上传。
+- **同哈希跳过**：覆盖上传前先取目标文件的 SHA-1，相同则直接跳过，不产生云端流量。
+- 公开 v7 的 `rapid_upload` 目前对 Agent 身份返回 404，且“秒传策略”接口未公开；
+  新文件按内容秒传暂不可用，上述同哈希跳过覆盖了最常见的重复上传场景。
 
 > v7 返回的下载地址需要 Bearer 凭据，不能匿名直连，所以没有整体切换 v7；
 > 这样既拿到官方上传能力，又保留下载不占中间层带宽。
@@ -255,6 +263,8 @@ wpsdav cookie
 | `upload.backend` | `private` | `private`（Cookie 接口）或 `v7`（官方 API） |
 | `upload.agent_api_key_file` | `agent.key` | Agent Key 文件（0600），相对配置目录解析 |
 | `upload.fallback` | `true` | v7 上传失败时自动回退私有接口 |
+| `upload.multipart_threshold_bytes` | `67108864` | 达到此大小走 v7 分块上传；`0` 关闭 |
+| `upload.skip_identical` | `true` | 目标文件 SHA-1 相同时跳过上传 |
 | `auth.mode` | `cookie` | `cookie` 或 `buaa` |
 | `auth.sso.username` / `password` | — | SSO 账号（也可用环境变量，见下） |
 | `auth.sso.entry_url` | `https://wps.buaa.edu.cn/` | SSO 入口 |

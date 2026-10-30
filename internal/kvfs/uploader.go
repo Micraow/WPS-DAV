@@ -72,20 +72,25 @@ type PrivateLister interface {
 // V7Uploader uploads through the official v7 API and resolves the resulting
 // private file id so downloads keep using the cookie backend.
 type V7Uploader struct {
-	Client *wpsv7.Client
-	Lister PrivateLister
+	Client             *wpsv7.Client
+	Lister             PrivateLister
+	MultipartThreshold int64
 }
 
 // Upload implements Uploader.
 func (v *V7Uploader) Upload(ctx context.Context, req UploadRequest, body io.ReadSeeker) (UploadResult, error) {
+	if v.MultipartThreshold > 0 && req.Size >= v.MultipartThreshold {
+		logging.Infof("v7 multipart upload: %s (%d bytes)", req.Name, req.Size)
+	}
 	_, err := v.Client.Upload(ctx, wpsv7.UploadRequest{
-		DriveID:    strconv.FormatInt(req.GroupID, 10),
-		ParentPath: req.ParentPath,
-		Name:       req.Name,
-		Size:       req.Size,
-		SHA256:     req.SHA256,
-		MD5:        req.MD5,
-		Overwrite:  req.Overwrite,
+		DriveID:            strconv.FormatInt(req.GroupID, 10),
+		ParentPath:         req.ParentPath,
+		Name:               req.Name,
+		Size:               req.Size,
+		SHA256:             req.SHA256,
+		MD5:                req.MD5,
+		Overwrite:          req.Overwrite,
+		MultipartThreshold: v.MultipartThreshold,
 	}, body)
 	if err != nil {
 		return UploadResult{}, err

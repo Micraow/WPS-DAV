@@ -308,7 +308,7 @@ func buildUploader(cfg *config.Config, client *wps.Client) (kvfs.Uploader, error
 		return nil, fmt.Errorf("upload.backend=v7 needs an Agent Key (run `wpsdav tui`, set WPSDAV_AGENT_API_KEY, or upload.agent_api_key_file)")
 	}
 	tokens := agent.NewTokenSource(key)
-	v7 := &kvfs.V7Uploader{Client: wpsv7.New(tokens), Lister: client}
+	v7 := &kvfs.V7Uploader{Client: wpsv7.New(tokens), Lister: client, MultipartThreshold: cfg.Upload.MultipartThresholdBytes}
 	if cfg.Upload.Fallback {
 		logging.Infof("upload backend: v7 (fallback to private, downloads unchanged)")
 		return &kvfs.FallbackUploader{Primary: v7, Secondary: private}, nil
@@ -601,6 +601,8 @@ func cmdDoctor(args []string) {
 		}
 		fmt.Printf("     fallback=%v\n", cfg.Upload.Fallback)
 	}
+	fmt.Printf("     multipart>=%d bytes, skip_identical=%v\n",
+		cfg.Upload.MultipartThresholdBytes, cfg.Upload.SkipIdentical)
 
 	rootID := cfg.RootGroupID
 	if rootID == 0 && cfg.Mode == config.ModePersonal {

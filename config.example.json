@@ -26,6 +26,8 @@
     "backend": "private",
     "agent_api_key": "",
     "agent_api_key_file": "agent.key",
-    "fallback": true
+    "fallback": true,
+    "multipart_threshold_bytes": 67108864,
+    "skip_identical": true
   }
 }
