@@ -29,7 +29,7 @@ func TestInitAndAgentKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Upload.Backend != config.UploadV7 || !loaded.HasAgentKey() {
+	if loaded.Upload.Backend != config.UploadPrivate || !loaded.HasAgentKey() {
 		t.Fatalf("backend=%q key=%v", loaded.Upload.Backend, loaded.HasAgentKey())
 	}
 	if loaded.AgentKey() != key {

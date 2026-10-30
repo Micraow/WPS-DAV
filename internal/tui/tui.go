@@ -289,7 +289,7 @@ func (a *app) loginAgent(ctx context.Context) {
 		a.pause("保存失败: " + err.Error())
 		return
 	}
-	a.pause(ui.Green("Agent Key 已保存，上传方式已切换为 v7。"))
+	a.pause(ui.Green("Agent Key 已保存。需要时在 3 上传方式 中切换到 v7。"))
 }
 
 func (a *app) uploadMenu(ctx context.Context) {
@@ -331,12 +331,11 @@ func (a *app) uploadMenu(ctx context.Context) {
 				a.pause("保存失败: " + err.Error())
 				return
 			}
-		} else {
-			cfg.Upload.Backend = config.UploadV7
-			if err := config.Save(cfg.SourcePath, cfg); err != nil {
-				a.pause("保存失败: " + err.Error())
-				return
-			}
+		}
+		cfg.Upload.Backend = config.UploadV7
+		if err := config.Save(cfg.SourcePath, cfg); err != nil {
+			a.pause("保存失败: " + err.Error())
+			return
 		}
 		a.pause(ui.Green("已切换为 v7 上传（下载仍走原路径）。"))
 	}

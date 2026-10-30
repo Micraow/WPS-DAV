@@ -63,8 +63,8 @@ func Init(path string, system, buaa bool, listen string, force bool) (*config.Co
 	return cfg, password, nil
 }
 
-// SaveAgentKey stores an AGENT_API_KEY (0600), switches uploads to v7 and
-// persists the config.
+// SaveAgentKey stores an AGENT_API_KEY (0600) and persists the config. It
+// deliberately does not change the selected upload backend.
 func SaveAgentKey(cfg *config.Config, key string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -83,7 +83,6 @@ func SaveAgentKey(cfg *config.Config, key string) error {
 		return err
 	}
 	cfg.Upload.AgentAPIKey = ""
-	cfg.Upload.Backend = config.UploadV7
 	if cfg.SourcePath != "" {
 		return config.Save(cfg.SourcePath, cfg)
 	}

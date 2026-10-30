@@ -396,7 +396,9 @@ func (u *uploadFile) Close() error {
 		SHA256:          hashes.SHA256,
 		MD5:             hashes.MD5,
 		OverwriteFileID: u.overwriteID,
-		Overwrite:       u.overwriteID != 0,
+		// WebDAV PUT replaces the target; overwrite also prevents WPS from
+		// creating a "name(1)" duplicate when the cache missed the file.
+		Overwrite: true,
 	}, u.tmp)
 	if err != nil {
 		logging.Errorf("%s upload failed: %s: %v", ui.Tag("upload"), fullPath, err)

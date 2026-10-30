@@ -268,7 +268,11 @@ func (c *Client) uploadMultipart(ctx context.Context, req UploadRequest, body io
 	if offset != req.Size {
 		return fail(fmt.Errorf("v7 multipart: read %d of %d bytes", offset, req.Size))
 	}
-	return c.commitMultipart(ctx, task.uploadID)
+	f, err := c.commitMultipart(ctx, task.uploadID)
+	if err != nil {
+		c.abortMultipart(ctx, task.uploadID)
+	}
+	return f, err
 }
 
 func (c *Client) createMultipart(ctx context.Context, req UploadRequest) (multipartTask, error) {

@@ -79,9 +79,7 @@ type V7Uploader struct {
 
 // Upload implements Uploader.
 func (v *V7Uploader) Upload(ctx context.Context, req UploadRequest, body io.ReadSeeker) (UploadResult, error) {
-	if v.MultipartThreshold > 0 && req.Size >= v.MultipartThreshold {
-		logging.Infof("v7 multipart upload: %s (%d bytes)", req.Name, req.Size)
-	}
+	multipart := v.MultipartThreshold > 0 && req.Size >= v.MultipartThreshold
 	_, err := v.Client.Upload(ctx, wpsv7.UploadRequest{
 		DriveID:            strconv.FormatInt(req.GroupID, 10),
 		ParentPath:         req.ParentPath,
@@ -94,6 +92,9 @@ func (v *V7Uploader) Upload(ctx context.Context, req UploadRequest, body io.Read
 	}, body)
 	if err != nil {
 		return UploadResult{}, err
+	}
+	if multipart {
+		logging.Infof("v7 multipart upload ok: %s (%d bytes)", req.Name, req.Size)
 	}
 	res := UploadResult{Size: req.Size}
 	if v.Lister == nil {
