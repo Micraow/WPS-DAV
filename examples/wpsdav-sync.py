@@ -10,12 +10,21 @@ Rules:
   remote deleted         -> keep local, do not re-upload
 
 Usage:
+  wpsdav-sync.py --remote wps:backup/MyDocs --exclude cache --dry-run
   wpsdav-sync.py --local ~/Documents/MyDocs --remote wps:backup/MyDocs \
-      --exclude cache --dry-run
+      --exclude-dir node_modules --exclude-dir build --gitignore
 
-Both --local and --remote are required so the script never guesses which
-directory to sync.  No persistent content cache is used; only a small JSON
-state file is kept (by default under ~/.local/state/wpsdav-sync/).
+--local defaults to the current directory, and --remote chooses the cloud
+target, so the same command can be run from several directories (each
+(local, remote) pair gets its own state file and lock).
+
+--exclude may be repeated to drop path prefixes; --exclude-dir drops
+directories by name at any depth; --gitignore additionally skips everything
+ignored by Git, including .gitignore files in subdirectories and nested
+repositories (the root itself does not have to be a repository).
+
+No persistent content cache is used; only a small JSON state file is kept (by
+default under ~/.local/state/wpsdav-sync/).
 
 This is a reference helper, not part of the wpsdav server.  See examples/
 README.md for the behavior matrix and limitations.
@@ -31,6 +40,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +105,8 @@ class Config:
     local: Path
     remote: str
     excludes: list[str]
+    exclude_dirs: list[str]
+    gitignore: bool
     state_dir: Path
     rclone: str
     transfers: int
@@ -107,6 +119,23 @@ class Config:
     stats_interval: str
 
 
+@dataclass
+class Ignored:
+    """Paths ignored by Git, relative to the sync root."""
+
+    dirs: set[str]
+    files: set[str]
+
+    def matches(self, rel: str) -> bool:
+        if rel in self.files:
+            return True
+        parts = rel.split("/")
+        for i in range(1, len(parts) + 1):
+            if "/".join(parts[:i]) in self.dirs:
+                return True
+        return False
+
+
 def matches_user_exclude(rel: str, excludes) -> bool:
     for ex in excludes:
         ex = ex.replace("\\", "/").strip("/")
@@ -115,13 +144,123 @@ def matches_user_exclude(rel: str, excludes) -> bool:
     return False
 
 
-def is_excluded_rel(rel: str, excludes) -> bool:
+def is_excluded_rel(rel: str, excludes, exclude_dirs=(), ignored=None) -> bool:
     parts = rel.split("/")
     if any(p.startswith(".") for p in parts):
         return True
     if parts and parts[-1].startswith("~$"):
         return True
+    # Only parent components count: a file may legitimately be named like an
+    # excluded directory without being under one.
+    if exclude_dirs and any(p in exclude_dirs for p in parts[:-1]):
+        return True
+    if ignored is not None and ignored.matches(rel):
+        return True
     return matches_user_exclude(rel, excludes)
+
+
+def _add_ignored(stdout: bytes, prefix: str, dirs: set, files: set):
+    for raw in stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8", "surrogateescape").replace(os.sep, "/")
+        if prefix:
+            rel = f"{prefix}/{rel}"
+        if rel.endswith("/"):
+            dirs.add(rel.rstrip("/"))
+        else:
+            files.add(rel)
+
+
+def _git_ls_ignored(args, cwd, env, prefix, dirs, files, where):
+    p = subprocess.run(args, cwd=cwd, env=env, capture_output=True)
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", "replace").strip()
+        raise Fatal(f"读取 git 忽略列表失败 ({where}): {err}")
+    _add_ignored(p.stdout, prefix, dirs, files)
+
+
+def _inside_worktree(root: Path) -> bool:
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            text=True, capture_output=True)
+    except FileNotFoundError:
+        raise Fatal("--gitignore 需要安装 git")
+    return p.returncode == 0 and p.stdout.strip() == "true"
+
+
+def _dir_ignored(rel: str, dirs) -> bool:
+    parts = rel.split("/")
+    for i in range(1, len(parts) + 1):
+        if "/".join(parts[:i]) in dirs:
+            return True
+    return False
+
+
+def _find_nested_repos(root: Path, ignored_dirs) -> list[str]:
+    """Return repo roots below root (relative paths, no trailing slash).
+
+    A directory holding a .git file or directory is a repo boundary: the
+    enclosing repo does not descend into it, so its own rules must be read
+    separately.  Directories hidden by the enclosing repo, and dot directories
+    (never synced), are pruned.
+    """
+    out = []
+    for dirpath, dirnames, _ in os.walk(root, topdown=True, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        if rel_dir == ".":
+            rel_dir = ""
+        if rel_dir and _dir_ignored(rel_dir, ignored_dirs):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames
+                       if d != ".git" and not d.startswith(".")]
+        if rel_dir and os.path.lexists(os.path.join(dirpath, ".git")):
+            out.append(rel_dir)
+    return out
+
+
+def collect_gitignored(root: Path, enabled: bool) -> Ignored:
+    """Return the paths Git would ignore below root.
+
+    The repo containing root is asked first (tracked files are therefore never
+    ignored, and .git/info/exclude applies).  If root is not in a repo, a
+    temporary bare index is pointed at root so plain .gitignore files are still
+    honoured.  Neither call crosses a nested repo boundary, so every nested
+    repo found by the walk is queried with its own rules.
+    """
+    if not enabled:
+        return Ignored(set(), set())
+    if not shutil_which("git"):
+        raise Fatal("--gitignore 需要安装 git")
+    dirs, files = set(), set()
+    ls_args = ["ls-files", "--others", "--ignored", "--exclude-standard",
+               "--directory", "-z"]
+
+    if _inside_worktree(root):
+        _git_ls_ignored(["git", "-C", str(root)] + ls_args, None, None,
+                        "", dirs, files, str(root))
+    else:
+        # No repository: use a throwaway index and let Git evaluate every
+        # .gitignore in the tree, including ones without a .git next to them.
+        with tempfile.TemporaryDirectory(prefix="wpsdav-sync-git-") as td:
+            init = subprocess.run(["git", "init", "-q", "--bare", td],
+                                  capture_output=True)
+            if init.returncode != 0:
+                err = init.stderr.decode("utf-8", "replace").strip()
+                raise Fatal(f"创建临时 Git 索引失败: {err}")
+            env = os.environ.copy()
+            env["GIT_DIR"] = td
+            env["GIT_WORK_TREE"] = str(root)
+            _git_ls_ignored(["git"] + ls_args, str(root), env, "",
+                            dirs, files, f"{root}（无仓库）")
+
+    for repo_rel in _find_nested_repos(root, dirs):
+        repo = root / repo_rel
+        _git_ls_ignored(["git", "-C", str(repo)] + ls_args, None, None,
+                        repo_rel, dirs, files, str(repo))
+    return Ignored(dirs, files)
 
 
 def make_state_paths(cfg: Config):
@@ -133,6 +272,7 @@ def make_state_paths(cfg: Config):
         cfg.state_dir / f"state-{key}.json",
         cfg.state_dir / f"lock-{key}",
         cfg.state_dir / f"last-run-{key}.log",
+        key,
     )
 
 
@@ -148,7 +288,7 @@ def acquire_lock(path: Path):
     return fd
 
 
-def load_state(path: Path, cfg: Config):
+def load_state(path: Path, cfg: Config, ignored: Ignored):
     if not path.exists():
         return {}, True
     try:
@@ -165,7 +305,7 @@ def load_state(path: Path, cfg: Config):
         raise Fatal(f"状态文件与当前路径不匹配: {path}")
     files = {}
     for rel, ent in (doc.get("files") or {}).items():
-        if is_excluded_rel(rel, cfg.excludes):
+        if is_excluded_rel(rel, cfg.excludes, cfg.exclude_dirs, ignored):
             continue
         l = ent.get("l")
         r = ent.get("r")
@@ -196,14 +336,14 @@ def write_state(path: Path, cfg: Config, files: dict):
     os.replace(tmp, path)
 
 
-def scan_local(root: Path, excludes):
+def scan_local(root: Path, excludes, exclude_dirs, ignored):
     """Return files, skipped counts/prefixes, and examples for bad names."""
     if not root.is_dir():
         raise Fatal(f"本地目录不存在或不是目录: {root}")
     files = {}
     skipped = {"dot_or_temp": 0, "symlink": 0, "non_regular": 0,
-               "excluded_dir": 0, "bad_name": 0, "illegal_name": 0,
-               "empty": 0}
+               "excluded_dir": 0, "exclude_dir_name": 0, "vcs_ignored": 0,
+               "bad_name": 0, "illegal_name": 0, "empty": 0}
     skip_prefixes = set()
     bad_examples = []
     illegal_examples = []
@@ -240,6 +380,12 @@ def scan_local(root: Path, excludes):
             if matches_user_exclude(rel, excludes):
                 skipped["excluded_dir"] += 1
                 continue
+            if exclude_dirs and d in exclude_dirs:
+                skipped["exclude_dir_name"] += 1
+                continue
+            if ignored.matches(rel):
+                skipped["vcs_ignored"] += 1
+                continue
             if any(p.startswith(".") for p in rel.split("/")) or d.startswith("~$"):
                 skipped["dot_or_temp"] += 1
                 continue
@@ -272,6 +418,9 @@ def scan_local(root: Path, excludes):
             rel = f"{rel_dir}/{name}" if rel_dir else name
             if matches_user_exclude(rel, excludes):
                 skipped["excluded_dir"] += 1
+                continue
+            if ignored.matches(rel):
+                skipped["vcs_ignored"] += 1
                 continue
             if any(p.startswith(".") for p in rel.split("/")) or name.startswith("~$"):
                 skipped["dot_or_temp"] += 1
@@ -329,12 +478,18 @@ def is_not_found(text: str) -> bool:
     ))
 
 
-def list_remote(cfg: Config, allow_missing: bool):
+def list_remote(cfg: Config, allow_missing: bool, ignored: Ignored):
     exclude_args = []
     for ex in cfg.excludes:
         p = ex.strip("/")
         if p:
             exclude_args += ["--exclude", f"/{p}", "--exclude", f"/{p}/**"]
+    for name in cfg.exclude_dirs:
+        # Let rclone pre-filter; names with glob metacharacters are left to
+        # the exact Python-side check so they cannot hide unrelated paths.
+        if any(ch in name for ch in "*?[]{}"):
+            continue
+        exclude_args += ["--exclude", f"**/{name}/**"]
     cmd = [cfg.rclone, "lsjson", cfg.remote,
            "--recursive", "--files-only", "--no-modtime", "--no-mimetype",
            "--checkers", str(cfg.checkers),
@@ -359,7 +514,7 @@ def list_remote(cfg: Config, allow_missing: bool):
         if ent.get("IsDir"):
             continue
         rel = ent.get("Path")
-        if not rel or is_excluded_rel(rel, cfg.excludes):
+        if not rel or is_excluded_rel(rel, cfg.excludes, cfg.exclude_dirs, ignored):
             continue
         size = int(ent.get("Size", -1))
         if size < 0:
@@ -368,8 +523,8 @@ def list_remote(cfg: Config, allow_missing: bool):
     return files, True
 
 
-def ensure_remote(cfg: Config):
-    files, exists = list_remote(cfg, allow_missing=True)
+def ensure_remote(cfg: Config, ignored: Ignored):
+    files, exists = list_remote(cfg, allow_missing=True, ignored=ignored)
     if exists:
         return files
     if cfg.dry_run:
@@ -381,7 +536,7 @@ def ensure_remote(cfg: Config):
         raise Fatal(
             f"创建云端目录失败: {cfg.remote}\n{(p.stderr or p.stdout).strip()}"
         )
-    files, exists = list_remote(cfg, allow_missing=False)
+    files, exists = list_remote(cfg, allow_missing=False, ignored=ignored)
     if not exists:
         raise Fatal(f"创建后仍无法列出云端目录: {cfg.remote}")
     return files
@@ -663,14 +818,21 @@ def parse_args(argv):
     home = Path.home()
     p = argparse.ArgumentParser(
         description="WPS/kDrive 非对称同步：本地删除会删云端，云端删除不动本地",
-        epilog="示例: wpsdav-sync.py --local ~/Documents/MyDocs "
-               "--remote wps:backup/MyDocs --exclude cache --dry-run")
-    p.add_argument("--local", required=True,
-                   help="本地目录（必填）")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="示例:\n"
+               "  cd ~/Documents/MyDocs && wpsdav-sync.py --remote wps:backup/MyDocs --dry-run\n"
+               "  wpsdav-sync.py --local ~/src/proj --remote wps:code/proj "
+               "--exclude-dir node_modules --gitignore")
+    p.add_argument("--local", default=".",
+                   help="本地目录（默认当前目录）")
     p.add_argument("--remote", required=True,
-                   help="rclone 远端目录，例如 wps:backup/MyDocs（必填）")
+                   help="云端目标目录，例如 wps:backup/MyDocs（必填）")
     p.add_argument("--exclude", action="append", default=[], metavar="PATH",
                    help="不同步的相对路径前缀，可重复；例如 cache 或 private/secret.txt")
+    p.add_argument("--exclude-dir", action="append", default=[], metavar="NAME",
+                   help="不同步的目录名，任意层级匹配，可重复；例如 node_modules、build")
+    p.add_argument("--gitignore", action="store_true",
+                   help="跳过 Git 忽略的文件和目录（.gitignore 等）")
     p.add_argument("--state-dir", default=os.environ.get(
         "XDG_STATE_HOME", str(home / ".local" / "state")) + "/wpsdav-sync",
         help="状态目录")
@@ -692,10 +854,20 @@ def parse_args(argv):
 
 def main(argv=None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    exclude_dirs = []
+    for name in args.exclude_dir:
+        name = name.strip().strip("/")
+        if not name:
+            continue
+        if "/" in name or "\\" in name:
+            raise Fatal(f"--exclude-dir 只接受目录名，不接受路径: {name}")
+        exclude_dirs.append(name)
     cfg = Config(
         local=Path(args.local).expanduser().resolve(),
         remote=args.remote,
         excludes=args.exclude,
+        exclude_dirs=exclude_dirs,
+        gitignore=args.gitignore,
         state_dir=Path(args.state_dir).expanduser(),
         rclone=args.rclone,
         transfers=args.transfers,
@@ -709,14 +881,20 @@ def main(argv=None) -> int:
     )
     if not shutil_which(cfg.rclone):
         raise Fatal(f"找不到 rclone: {cfg.rclone}")
-    state_path, lock_path, report_path = make_state_paths(cfg)
+    if not cfg.local.is_dir():
+        raise Fatal(f"本地目录不存在或不是目录: {cfg.local}")
+    ignored = collect_gitignored(cfg.local, cfg.gitignore)
+    state_path, lock_path, report_path, key = make_state_paths(cfg)
     lock_fd = acquire_lock(lock_path)
     report = []
     try:
         eprint(f"wpsdav-sync: 本地 {cfg.local}")
         eprint(f"wpsdav-sync: 云端 {cfg.remote}"
                + ("  [试运行]" if cfg.dry_run else ""))
-        state, first_run = load_state(state_path, cfg)
+        if cfg.gitignore:
+            eprint(f"wpsdav-sync: Git 忽略 {len(ignored.dirs)} 个目录、"
+                   f"{len(ignored.files)} 个文件")
+        state, first_run = load_state(state_path, cfg, ignored)
         if first_run:
             eprint("wpsdav-sync: 首次运行，没有历史状态")
 
@@ -724,12 +902,14 @@ def main(argv=None) -> int:
         eprint("wpsdav-sync: 正在扫描本地...")
         local_files, skipped, skip_prefixes, bad_examples, \
             illegal_examples, empty_examples = scan_local(
-                cfg.local, cfg.excludes)
+                cfg.local, cfg.excludes, set(cfg.exclude_dirs), ignored)
         eprint(f"wpsdav-sync: 本地 {len(local_files)} 个文件，"
                f"{human_bytes(sum(v[0] for v in local_files.values()))}"
                f"；跳过 符号链接 {skipped['symlink']}、"
                f"点项/临时项 {skipped['dot_or_temp']}、"
-               f"排除项 {skipped['excluded_dir']}、"
+               f"路径排除 {skipped['excluded_dir']}、"
+               f"目录名排除 {skipped['exclude_dir_name']}、"
+               f"VCS 忽略 {skipped['vcs_ignored']}、"
                f"其他类型 {skipped['non_regular']}、"
                f"非法文件名 {skipped['bad_name']}、"
                f"WPS 不兼容文件名 {skipped['illegal_name']}、"
@@ -754,7 +934,7 @@ def main(argv=None) -> int:
             )
 
         eprint("wpsdav-sync: 正在读取云端列表（文件多时可能需要几分钟）...")
-        remote_files = ensure_remote(cfg)
+        remote_files = ensure_remote(cfg, ignored)
         eprint(f"wpsdav-sync: 云端 {len(remote_files)} 个文件，"
                f"{human_bytes(sum(remote_files.values()))}")
 
@@ -864,7 +1044,7 @@ def main(argv=None) -> int:
             write_state(state_path, cfg, state)
 
         if uploads:
-            listfile = state_path.parent / "uploads.txt"
+            listfile = state_path.parent / f"uploads-{key}.txt"
             listfile.write_text("".join(r + "\n" for r in uploads), encoding="utf-8")
             cmd = [cfg.rclone, "copy", str(cfg.local), cfg.remote,
                    "--files-from-raw", str(listfile),
@@ -888,7 +1068,7 @@ def main(argv=None) -> int:
             global_errors.extend(gerr)
 
         if downloads:
-            listfile = state_path.parent / "downloads.txt"
+            listfile = state_path.parent / f"downloads-{key}.txt"
             listfile.write_text("".join(r + "\n" for r in downloads), encoding="utf-8")
             cmd = [cfg.rclone, "copy", cfg.remote, str(cfg.local),
                    "--files-from-raw", str(listfile),
@@ -917,7 +1097,7 @@ def main(argv=None) -> int:
             global_errors.extend(gerr)
 
         if deletes:
-            listfile = state_path.parent / "deletes.txt"
+            listfile = state_path.parent / f"deletes-{key}.txt"
             listfile.write_text("".join(r + "\n" for r in deletes), encoding="utf-8")
             cmd = [cfg.rclone, "delete", cfg.remote,
                    "--files-from-raw", str(listfile),
@@ -960,6 +1140,9 @@ def main(argv=None) -> int:
         report.append(f"skipped_bad_names={skipped['bad_name']}")
         report.append(f"skipped_wps_illegal_names={skipped['illegal_name']}")
         report.append(f"skipped_empty_files={skipped['empty']}")
+        report.append(f"skipped_exclude_dirs={skipped['exclude_dir_name']}")
+        report.append(f"skipped_vcs_ignored={skipped['vcs_ignored']}")
+        report.append(f"gitignore={cfg.gitignore}")
         report.append("")
         report.append("## skipped_bad_names")
         report.extend(f"{reason}\t{rel!r}" for reason, rel in bad_examples)

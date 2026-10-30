@@ -26,6 +26,7 @@
 - Python 3.8+
 - [rclone](https://rclone.org/)（需要支持 `--files-from-raw`、`--no-check-dest`、
   `--no-traverse`、`--use-json-log`）
+- `git`（仅 `--gitignore` 需要）
 - 一个可用的 rclone 远端。以 wpsdav 为例：
 
   ```bash
@@ -63,16 +64,28 @@ python3 examples/wpsdav-sync.py \
 
 ```bash
 install -m755 examples/wpsdav-sync.py ~/.local/bin/wpsdav-sync
-wpsdav-sync --local ~/Documents/MyDocs --remote wps:backup/MyDocs --dry-run
+wpsdav-sync --remote wps:backup/MyDocs --dry-run
 ```
+
+`--local` 默认是当前目录，所以可以直接在每个要同步的目录里运行，并分别指定云端目标：
+
+```bash
+cd ~/src/project-a && wpsdav-sync --remote wps:code/project-a --gitignore
+cd ~/src/project-b && wpsdav-sync --remote wps:code/project-b --gitignore
+```
+
+不同的 `(本地目录, 云端目录)` 组合使用各自的状态文件和锁，可以同时运行。
+同一个组合不能并发运行两个实例。
 
 常用参数：
 
 | 参数 | 说明 |
 |---|---|
-| `--local` | 本地目录，必填 |
-| `--remote` | rclone 远端目录，必填；建议用独立子目录，不要直接指向云盘根目录 |
-| `--exclude PATH` | 不同步的相对路径前缀，可重复。例如 `cache` 会排除整个 `cache/`；`private/secret.txt` 只排除这个文件 |
+| `--local` | 本地目录，默认当前目录 |
+| `--remote` | 云端目标目录（rclone 远端路径），必填；例如 `wps:code/project-a` |
+| `--exclude PATH` | 不同步的相对路径前缀，可重复。例如 `cache` 会排除根目录下的整个 `cache/`；`private/secret.txt` 只排除这个文件 |
+| `--exclude-dir NAME` | 不同步的目录名，任意层级匹配，可重复。例如 `--exclude-dir node_modules --exclude-dir build` |
+| `--gitignore` | 跳过 Git 忽略的文件和目录；支持根目录不是仓库、以及子目录里的嵌套仓库 |
 | `--transfers N` | 并发传输数，默认 8；被 WPS 限流时降到 4 |
 | `--buffer-size SIZE` | 每个传输的内存缓冲，默认 32M |
 | `--max-delete-pct N` | 单次最多删除云端文件的比例，默认 10% |
@@ -82,7 +95,7 @@ wpsdav-sync --local ~/Documents/MyDocs --remote wps:backup/MyDocs --dry-run
 
 ## 固定排除项
 
-除了 `--exclude` 指定的路径，脚本还会跳过：
+除了 `--exclude` / `--exclude-dir` / `--gitignore` 指定的内容，脚本还会跳过：
 
 - 所有点开头的文件和目录（WPS 拒绝点开头的名字，`.git`、`.vscode`、
   `.venv`、`.ipynb_checkpoints` 等也不会上传）；
@@ -100,6 +113,19 @@ wpsdav-sync --local ~/Documents/MyDocs --remote wps:backup/MyDocs --dry-run
 保留空文件这个“存在性”，需要先修 wpsdav 的空文件上传路径，或放一个占位文件。
 
 被跳过的路径会写入每次运行的报告，方便排查。
+
+`--gitignore` 按 Git 自己的判断取忽略列表，分三种情况：
+
+- `--local` 在某个仓库内：用该仓库的规则，包括父目录的 `.gitignore`、
+  `.git/info/exclude` 和全局 excludes；已跟踪的文件即使匹配 `.gitignore` 也不会被跳过。
+- `--local` 不是仓库：用一个临时索引解析整棵树里的 `.gitignore`，所以即使没有 `.git`
+  目录，子目录里的 `.gitignore` 也会生效。
+- 子目录里是独立的嵌套仓库：递归进入各自的仓库读取规则，路径按相对 `--local` 归一化。
+
+被 Git 忽略的文件即使以前上传过，也不会因为这次“看不见”而从云端删除。
+
+`--exclude-dir` 只匹配目录名，不匹配文件名；如果只想排除根目录下的某个目录，
+用 `--exclude path/to/dir` 更精确。
 
 ## 状态与缓存
 
@@ -124,7 +150,7 @@ wpsdav-sync --local ~/Documents/MyDocs --remote wps:backup/MyDocs --dry-run
 
 ## 安全保护
 
-- **同一个目录加锁**：不能并发运行两个实例。
+- **同一个 (本地, 云端) 组合加锁**：该组合不能并发运行两个实例；不同组合可以同时运行。
 - **本地扫描到 0 个文件**：如果历史状态显示以前有文件，脚本会中止，避免把云端全部当成
   “本地已删除”。确认本地确实清空后加 `--force`。
 - **云端列表为空**：历史状态显示云端曾有文件时会中止，避免接口异常导致误判。
@@ -156,6 +182,8 @@ wpsdav-sync --local ~/Documents/MyDocs --remote wps:backup/MyDocs --dry-run
   无锁，且未做完整测试。
 - **不做冲突文件重命名**：冲突只记录在报告里，由用户决定。
 - 脚本假设远端最终一致延迟不严重；WPS 目录列表短暂滞后时，下一次运行会自动收敛。
+- **`--gitignore` 不会跨越被忽略的目录**：如果外层仓库把某个目录整个忽略，该目录下的
+  嵌套仓库也不会再读取自己的规则；整个目录本来就不会同步。
 
 ## 退出码
 
