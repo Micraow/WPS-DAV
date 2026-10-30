@@ -12,3 +12,5 @@ packaging/aur/*/*.tar.gz
 cookie*.txt
 __pycache__/
 *.pyc
+agent.key
+*.agent.key

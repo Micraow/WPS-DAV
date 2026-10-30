@@ -22,13 +22,17 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
+	"wpsdav/internal/agent"
 	"wpsdav/internal/auth"
 	"wpsdav/internal/config"
 	"wpsdav/internal/kvfs"
 	"wpsdav/internal/logging"
 	"wpsdav/internal/server"
+	"wpsdav/internal/service"
+	"wpsdav/internal/tui"
 	"wpsdav/internal/ui"
 	"wpsdav/internal/wps"
+	"wpsdav/internal/wpsv7"
 )
 
 const envConfigFile = "WPSDAV_CONFIG"
@@ -46,6 +50,10 @@ func main() {
 		cmdInit(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
+	case "tui":
+		cmdTUI(os.Args[2:])
+	case "service":
+		cmdService(os.Args[2:])
 	case "doctor":
 		cmdDoctor(os.Args[2:])
 	case "groups":
@@ -70,6 +78,8 @@ func usage() {
 	rows := [][2]string{
 		{"init", "create a config file with a generated password"},
 		{"serve", "run the WebDAV/control server"},
+		{"tui", "interactive setup and operations menu"},
+		{"service", "enable/disable/status of the systemd user unit"},
 		{"doctor", "check credentials, listing, and download-URL behavior"},
 		{"groups", "list drives (groups) visible to the account"},
 		{"cookie", "install a cookie from an argument or stdin"},
@@ -287,6 +297,71 @@ func randomPassword(n int) (string, error) {
 	return string(out), nil
 }
 
+// buildUploader selects the private or v7 upload backend.
+func buildUploader(cfg *config.Config, client *wps.Client) (kvfs.Uploader, error) {
+	private := &kvfs.PrivateUploader{Client: client}
+	if cfg.Upload.Backend != config.UploadV7 {
+		return private, nil
+	}
+	key := cfg.AgentKey()
+	if key == "" {
+		return nil, fmt.Errorf("upload.backend=v7 needs an Agent Key (run `wpsdav tui`, set WPSDAV_AGENT_API_KEY, or upload.agent_api_key_file)")
+	}
+	tokens := agent.NewTokenSource(key)
+	v7 := &kvfs.V7Uploader{Client: wpsv7.New(tokens), Lister: client}
+	if cfg.Upload.Fallback {
+		logging.Infof("upload backend: v7 (fallback to private, downloads unchanged)")
+		return &kvfs.FallbackUploader{Primary: v7, Secondary: private}, nil
+	}
+	logging.Infof("upload backend: v7 (downloads unchanged)")
+	return v7, nil
+}
+
+func cmdTUI(args []string) {
+	fs := pflag.NewFlagSet("tui", pflag.ExitOnError)
+	path := fs.StringP("config", "c", "", "config file")
+	_ = fs.Parse(os.Args[2:])
+	if err := tui.Run(context.Background(), tui.Options{ConfigPath: *path, Version: version}); err != nil {
+		logging.Fatalf("tui: %v", err)
+	}
+}
+
+func cmdService(args []string) {
+	if len(args) == 0 {
+		logging.Fatalf("usage: wpsdav service enable|disable|status|restart")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	switch args[0] {
+	case "enable":
+		if configPath("") == "" {
+			logging.Warnf("no config found; the service will fail to start (run `wpsdav tui` first)")
+		}
+		if err := service.Enable(ctx); err != nil {
+			logging.Fatalf("%v", err)
+		}
+		fmt.Println(ui.Green("autostart enabled"))
+	case "disable":
+		if err := service.Disable(ctx); err != nil {
+			logging.Fatalf("%v", err)
+		}
+		fmt.Println(ui.Green("autostart disabled"))
+	case "restart":
+		if err := service.Restart(ctx); err != nil {
+			logging.Fatalf("%v", err)
+		}
+		fmt.Println(ui.Green("service restarted"))
+	case "status":
+		st, err := service.Get(ctx)
+		if err != nil {
+			logging.Fatalf("%v", err)
+		}
+		fmt.Printf("unit: %v\nenabled: %v\nactive: %v\n", st.UnitPresent, st.Enabled, st.Active)
+	default:
+		logging.Fatalf("unknown service command %q (want enable|disable|status|restart)", args[0])
+	}
+}
+
 func cmdServe(args []string) {
 	fs := pflag.NewFlagSet("serve", pflag.ExitOnError)
 	cfg := loadConfig(fs)
@@ -331,7 +406,11 @@ func cmdServe(args []string) {
 	logging.Infof("mode=%s root_group=%d company=%d auth=%s", cfg.Mode, rootID, client.CompanyID(), prov.Name())
 
 	tree := kvfs.NewTree(client, rootID, time.Duration(cfg.CacheTTLSeconds)*time.Second)
-	srv := server.New(cfg, client, tree)
+	uploader, err := buildUploader(cfg, client)
+	if err != nil {
+		logging.Fatalf("upload: %v", err)
+	}
+	srv := server.New(cfg, client, tree, uploader)
 
 	bg, stopBG := context.WithCancel(context.Background())
 	go prov.Run(bg, func(cookie string) {
@@ -501,6 +580,26 @@ func cmdDoctor(args []string) {
 		for _, g := range groups {
 			fmt.Printf("     %-16d %s\n", g.GroupID, g.Name)
 		}
+	}
+
+	fmt.Println(ui.Bold("== upload =="))
+	fmt.Printf("     backend=%s (download stays on the private path)\n", cfg.Upload.Backend)
+	if cfg.Upload.Backend == config.UploadV7 {
+		key := cfg.AgentKey()
+		if key == "" {
+			fmt.Printf("%s   no Agent Key (run `wpsdav tui`)\n", ui.Red("FAIL"))
+		} else {
+			ts := agent.NewTokenSource(key)
+			tctx, tcancel := context.WithTimeout(ctx, 20*time.Second)
+			_, terr := ts.Token(tctx)
+			tcancel()
+			if terr != nil {
+				fmt.Printf("%s   Agent Key: %v\n", ui.Red("FAIL"), terr)
+			} else {
+				fmt.Printf("%s   Agent Key valid (token 12h, auto-renewed)\n", ui.Green("OK"))
+			}
+		}
+		fmt.Printf("     fallback=%v\n", cfg.Upload.Fallback)
 	}
 
 	rootID := cfg.RootGroupID

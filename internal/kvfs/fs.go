@@ -28,6 +28,8 @@ import (
 type FS struct {
 	Tree   *Tree
 	Client *wps.Client
+	// Uploader stores file bytes. Nil means the private cookie backend.
+	Uploader Uploader
 	// ReadOnly blocks mkdir/put/delete/move/copy.
 	ReadOnly bool
 	// SpoolDir is where PUT bodies are buffered for hashing.
@@ -359,12 +361,25 @@ func (u *uploadFile) Close() error {
 		MD5:    hex.EncodeToString(u.md5.Sum(nil)),
 		Size:   u.written,
 	}
-	resp, err := u.fs.Client.Upload(u.ctx, wps.UploadOptions{
+	uploader := u.fs.Uploader
+	if uploader == nil {
+		uploader = &PrivateUploader{Client: u.fs.Client}
+	}
+	parentPath := pathComponents(u.dirPath)
+	if err := validateUploadPath(parentPath); err != nil {
+		return err
+	}
+	res, err := uploader.Upload(u.ctx, UploadRequest{
 		GroupID:         u.parent.GroupID,
 		ParentID:        u.parent.ID,
+		ParentPath:      parentPath,
 		Name:            u.name,
-		Hashes:          hashes,
+		Size:            hashes.Size,
+		SHA1:            hashes.SHA1,
+		SHA256:          hashes.SHA256,
+		MD5:             hashes.MD5,
 		OverwriteFileID: u.overwriteID,
+		Overwrite:       u.overwriteID != 0,
 	}, u.tmp)
 	fullPath := path.Join(u.dirPath, u.name)
 	if err != nil {
@@ -372,17 +387,28 @@ func (u *uploadFile) Close() error {
 		return err
 	}
 	logging.Transfer("upload", fullPath, hashes.Size, time.Since(u.start))
-	newID := resp.ID
-	if newID == 0 {
-		newID = u.overwriteID
+
+	size := res.Size
+	if size == 0 {
+		size = hashes.Size
+	}
+	if res.FileID == 0 {
+		// The backend succeeded but the private id is not known yet; force a
+		// listing on the next access instead of caching an unusable node.
+		u.fs.Tree.Forget(u.dirPath)
+		return nil
+	}
+	mtime := time.Now()
+	if res.Mtime > 0 {
+		mtime = time.Unix(res.Mtime, 0)
 	}
 	u.fs.Tree.Seed(u.dirPath, &Node{
 		Name:     u.name,
-		ID:       newID,
+		ID:       res.FileID,
 		GroupID:  u.parent.GroupID,
 		ParentID: u.parent.ID,
-		Size:     hashes.Size,
-		Mtime:    time.Now(),
+		Size:     size,
+		Mtime:    mtime,
 	})
 	return nil
 }

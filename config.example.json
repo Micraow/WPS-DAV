@@ -21,5 +21,11 @@
   "custom_ua": "",
   "spool_dir": "",
   "upload_retries": 5,
-  "upload_retry_backoff_seconds": 2
+  "upload_retry_backoff_seconds": 2,
+  "upload": {
+    "backend": "private",
+    "agent_api_key": "",
+    "agent_api_key_file": "agent.key",
+    "fallback": true
+  }
 }

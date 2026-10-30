@@ -50,16 +50,23 @@ git clone https://github.com/Micraow/WPS-DAV.git && cd WPS-DAV
 go build -o wpsdav .
 ```
 
-### 2. 初始化
+### 2. 初始化（推荐用 TUI）
+
+```bash
+wpsdav tui
+```
+
+按菜单依次完成：**初始化 → 登录 → 上传方式 → 开机自启**。每一步都有状态提示，
+不需要记参数。
+
+非交互方式：
 
 ```bash
 wpsdav init
 # 生成 ~/.config/wpsdav/config.json（0600）和随机 WebDAV 密码
 ```
 
-`init` 会打印生成的用户名和密码，并把 Cookie 文件放到
-`~/.local/state/wpsdav/cookie.txt`。需要系统级配置时用
-`sudo wpsdav init --system`（写入 `/etc/wpsdav/config.json`）。
+需要系统级配置时用 `sudo wpsdav init --system`（写入 `/etc/wpsdav/config.json`）。
 
 配置查找顺序（第一个匹配生效）：
 
@@ -176,6 +183,30 @@ rclone sync /本地目录 wpsdav:备份目录 --size-only --filter "- .*" --tran
 | Windows 资源管理器 | 添加网络位置 → `http://127.0.0.1:8705/dav`（或映射网络驱动器 `\\127.0.0.1@8705\dav`） |
 | RaiDrive / Cyberduck / WinSCP | 新建 WebDAV 连接，填同一地址 |
 
+## ⬆️ 上传方式
+
+| 方式 | 说明 |
+|---|---|
+| `private`（默认） | 使用 Cookie 私有接口，兼容性最好 |
+| `v7` | 使用官方 WPS 365 API；需要 Agent Key；失败自动回退 |
+
+切换方式：`wpsdav tui` → `3 上传方式`，或直接改配置：
+
+```json
+"upload": {
+  "backend": "v7",
+  "agent_api_key_file": "agent.key",
+  "fallback": true
+}
+```
+
+Agent Key 在 `account.wps.cn → 个人中心 → AI 服务 → 我的 AI Agent` 创建，格式
+`apik:<id>.<secret>`。**v7 只影响上传**：下载、列目录、WebDAV 语义仍走 Cookie，
+预签名链接的 302 直连保持不变。
+
+> v7 返回的下载地址需要 Bearer 凭据，不能匿名直连，所以没有整体切换 v7；
+> 这样既拿到官方上传能力，又保留下载不占中间层带宽。
+
 ## 🧭 工作原理
 
 ```
@@ -221,6 +252,9 @@ wpsdav cookie
 | `dav_path` | `/dav` | WebDAV 挂载路径 |
 | `username` / `password` | — | WebDAV 端点的 Basic Auth 凭据（必填） |
 | `cookie_file` | XDG state 目录 | Cookie 缓存文件；用户配置默认 `~/.local/state/wpsdav/cookie.txt`，`/etc` 配置默认 `/var/lib/wpsdav/cookie.txt` |
+| `upload.backend` | `private` | `private`（Cookie 接口）或 `v7`（官方 API） |
+| `upload.agent_api_key_file` | `agent.key` | Agent Key 文件（0600），相对配置目录解析 |
+| `upload.fallback` | `true` | v7 上传失败时自动回退私有接口 |
 | `auth.mode` | `cookie` | `cookie` 或 `buaa` |
 | `auth.sso.username` / `password` | — | SSO 账号（也可用环境变量，见下） |
 | `auth.sso.entry_url` | `https://wps.buaa.edu.cn/` | SSO 入口 |
@@ -248,8 +282,10 @@ export WPSDAV_SSO_PASSWORD=密码
 ## 🧰 命令
 
 ```text
+wpsdav tui       交互式引导：初始化、登录、上传方式、开机自启、诊断
 wpsdav init      生成配置文件与随机 WebDAV 密码
 wpsdav serve     启动 WebDAV / 控制服务
+wpsdav service   管理开机自启：enable | disable | status | restart
 wpsdav doctor    只读自检：登录态、云盘列表、目录读取、下载直链
 wpsdav groups    列出当前账号可见的全部分组和团队文档
 wpsdav cookie    安装浏览器 Cookie（参数或 stdin）
@@ -266,13 +302,13 @@ wpsdav version   查看版本信息
 - 刷新缓存：`curl -u user:pass -X POST http://127.0.0.1:8705/admin/refresh`
 - 更新 Cookie：直接覆盖 `cookie.txt`，或
   `curl -u user:pass -X PUT --data-binary @cookie.txt http://127.0.0.1:8705/admin/cookie`
-- 用户级服务：安装包（0.1.1+）自带 systemd **用户单元**（不是系统单元）：
+- 开机自启（安装包自带 systemd **用户单元**）：
   ```bash
-  systemctl --user daemon-reload
-  systemctl --user enable --now wpsdav
-  systemctl --user status wpsdav
+  wpsdav service enable    # 启用并立即启动
+  wpsdav service status
+  wpsdav service disable   # 停止并移出开机自启
   ```
-  配置需先用 `wpsdav init` 生成。要让服务在注销后继续运行，执行一次
+  也可以直接用 `systemctl --user enable --now wpsdav`。要让服务在注销后继续运行：
   `loginctl enable-linger $USER`。
 - 远程部署：监听 `0.0.0.0` 时请置于 TLS 反向代理之后，Cookie 等价于完整账号权限。
 

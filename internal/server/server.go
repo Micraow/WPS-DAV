@@ -37,8 +37,8 @@ type Server struct {
 }
 
 // New builds the HTTP server.
-func New(cfg *config.Config, client *wps.Client, tree *kvfs.Tree) *Server {
-	fs := &kvfs.FS{Tree: tree, Client: client, SpoolDir: cfg.SpoolDir}
+func New(cfg *config.Config, client *wps.Client, tree *kvfs.Tree, uploader kvfs.Uploader) *Server {
+	fs := &kvfs.FS{Tree: tree, Client: client, Uploader: uploader, SpoolDir: cfg.SpoolDir}
 	s := &Server{
 		cfg:    cfg,
 		client: client,

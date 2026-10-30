@@ -89,6 +89,33 @@ type Config struct {
 	// Delays grow exponentially up to 30s and carry equal jitter. The default
 	// is 2 seconds. Zero disables the delay (but keeps the retries).
 	UploadRetryBackoffSeconds float64 `json:"upload_retry_backoff_seconds"`
+
+	// Upload selects how file bytes are stored.
+	Upload UploadConfig `json:"upload"`
+
+	// SourcePath is the file this config was loaded from (not serialized).
+	SourcePath string `json:"-"`
+}
+
+// Upload backend names.
+const (
+	UploadPrivate = "private"
+	UploadV7      = "v7"
+)
+
+// UploadConfig selects and configures the upload backend.
+type UploadConfig struct {
+	// Backend is "private" (default, cookie API) or "v7" (official API).
+	Backend string `json:"backend"`
+
+	// AgentAPIKey is an inline AGENT_API_KEY (discouraged; prefer a file).
+	AgentAPIKey string `json:"agent_api_key"`
+
+	// AgentAPIKeyFile holds the AGENT_API_KEY (0600 recommended).
+	AgentAPIKeyFile string `json:"agent_api_key_file"`
+
+	// Fallback retries with the private backend when v7 fails (default true).
+	Fallback bool `json:"fallback"`
 }
 
 // AuthConfig selects and configures the credential source.
@@ -120,6 +147,12 @@ func Default() *Config {
 
 		UploadRetries:             5,
 		UploadRetryBackoffSeconds: 2,
+
+		Upload: UploadConfig{
+			Backend:         UploadPrivate,
+			AgentAPIKeyFile: "agent.key",
+			Fallback:        true,
+		},
 
 		Auth: AuthConfig{
 			Mode: "cookie",
@@ -172,6 +205,7 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.SourcePath = path
 	cfg.resolvePaths(path)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -200,6 +234,9 @@ func (c *Config) resolvePaths(configPath string) {
 	}
 	if c.LogFile != "" && !filepath.IsAbs(c.LogFile) {
 		c.LogFile = filepath.Join(dir, c.LogFile)
+	}
+	if c.Upload.AgentAPIKeyFile != "" && !filepath.IsAbs(c.Upload.AgentAPIKeyFile) {
+		c.Upload.AgentAPIKeyFile = filepath.Join(dir, c.Upload.AgentAPIKeyFile)
 	}
 }
 
@@ -239,6 +276,13 @@ func (c *Config) Validate() error {
 	if c.Mode == ModeBusiness && c.RootGroupID == 0 {
 		return errors.New("business mode requires root_group_id (run `wpsdav groups` to list them)")
 	}
+	switch c.Upload.Backend {
+	case "":
+		c.Upload.Backend = UploadPrivate
+	case UploadPrivate, UploadV7:
+	default:
+		return fmt.Errorf("upload.backend must be %q or %q", UploadPrivate, UploadV7)
+	}
 	switch c.Auth.Mode {
 	case "", "cookie":
 		c.Auth.Mode = "cookie"
@@ -253,4 +297,33 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("auth.mode must be %q or %q", "cookie", "buaa")
 	}
 	return nil
+}
+
+// AgentKey resolves the AGENT_API_KEY: environment, inline config, then file.
+func (c *Config) AgentKey() string {
+	if v := strings.TrimSpace(os.Getenv("WPSDAV_AGENT_API_KEY")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(c.Upload.AgentAPIKey); v != "" {
+		return v
+	}
+	if c.Upload.AgentAPIKeyFile != "" {
+		if data, err := os.ReadFile(c.Upload.AgentAPIKeyFile); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
+}
+
+// HasAgentKey reports whether an agent key is configured (without loading it
+// into logs).
+func (c *Config) HasAgentKey() bool { return c.AgentKey() != "" }
+
+// Save writes the config back to path with 0600 permissions.
+func Save(path string, cfg *Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
