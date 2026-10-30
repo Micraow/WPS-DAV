@@ -247,11 +247,21 @@ func (c *Client) uploadMultipart(ctx context.Context, req UploadRequest, body io
 		if _, err := io.CopyN(sum, body, n); err != nil {
 			return fail(fmt.Errorf("v7 multipart: read part %d: %w", part, err))
 		}
-		if _, err := body.Seek(offset, io.SeekStart); err != nil {
-			return fail(err)
+		var perr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if _, err := body.Seek(offset, io.SeekStart); err != nil {
+				return fail(err)
+			}
+			perr = c.putPart(ctx, task.uploadAddr, part, n, sum.Sum(nil), body)
+			if perr == nil {
+				break
+			}
+			if attempt < 2 && !sleep(ctx, attempt) {
+				return fail(ctx.Err())
+			}
 		}
-		if err := c.putPart(ctx, task.uploadAddr, part, n, sum.Sum(nil), body); err != nil {
-			return fail(err)
+		if perr != nil {
+			return fail(fmt.Errorf("v7 multipart: part %d: %w", part, perr))
 		}
 		offset += n
 	}
