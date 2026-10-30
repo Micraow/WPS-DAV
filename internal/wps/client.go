@@ -52,7 +52,7 @@ func newTransport() *http.Transport {
 		MaxIdleConns:          128,
 		MaxIdleConnsPerHost:   32,
 		MaxConnsPerHost:       32,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -131,8 +131,31 @@ func (c *Client) driveURL(path string) string {
 // CompanyID returns the discovered company id (business mode).
 func (c *Client) CompanyID() int64 { return c.company.Load() }
 
-// CheckLogin calls islogin and records the account state.
+// CheckLogin calls islogin and records the account state. Transient network
+// failures are retried; an explicit rejection (403) is returned immediately.
 func (c *Client) CheckLogin(ctx context.Context) (LoginState, error) {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		st, err := c.checkLoginOnce(ctx)
+		if err == nil {
+			return st, nil
+		}
+		var httpErr *APIError
+		if errors.As(err, &httpErr) && httpErr.Status != http.StatusTooManyRequests && httpErr.Status < 500 {
+			return st, err
+		}
+		if ctx.Err() != nil {
+			return st, ctx.Err()
+		}
+		last = err
+		if !sleepCtx(ctx, backoff(attempt)) {
+			return st, ctx.Err()
+		}
+	}
+	return LoginState{}, last
+}
+
+func (c *Client) checkLoginOnce(ctx context.Context) (LoginState, error) {
 	var st LoginState
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, loginCheckURL, nil)
 	if err != nil {

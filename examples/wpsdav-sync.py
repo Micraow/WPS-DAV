@@ -117,6 +117,8 @@ class Config:
     force: bool
     max_delete_pct: int
     stats_interval: str
+    listing_cache_ttl: int
+    refresh_listing: bool
 
 
 @dataclass
@@ -273,6 +275,7 @@ def make_state_paths(cfg: Config):
         cfg.state_dir / f"lock-{key}",
         cfg.state_dir / f"last-run-{key}.log",
         key,
+        cfg.state_dir / f"listing-{key}.json",
     )
 
 
@@ -478,7 +481,49 @@ def is_not_found(text: str) -> bool:
     ))
 
 
-def list_remote(cfg: Config, allow_missing: bool, ignored: Ignored):
+def read_listing_cache(cfg: Config, listing_path: Path):
+    """Return (files, age) when a fresh listing cache exists, else None."""
+    if cfg.listing_cache_ttl <= 0 or cfg.refresh_listing:
+        return None
+    try:
+        data = json.loads(listing_path.read_text(encoding="utf-8"))
+        age = time.time() - float(data["time"])
+        files = data["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if age < 0 or age > cfg.listing_cache_ttl:
+        return None
+    try:
+        return {str(k): int(v) for k, v in files.items()}, age
+    except (TypeError, ValueError):
+        return None
+
+
+def write_listing_cache(listing_path: Path, files: dict):
+    tmp = listing_path.with_suffix(".tmp")
+    payload = {"time": time.time(), "files": files}
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, listing_path)
+    except OSError as exc:
+        eprint(f"wpsdav-sync: 警告: 写入列表缓存失败: {exc}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def list_remote(cfg: Config, allow_missing: bool, ignored: Ignored,
+                listing_path: Path | None = None):
+    cached = read_listing_cache(cfg, listing_path) if listing_path else None
+    if cached is not None:
+        files, age = cached
+        eprint(f"wpsdav-sync: 使用 {int(age)} 秒前的云端列表缓存"
+               f"（--refresh-listing 可强制刷新）")
+        return files, True
+
     exclude_args = []
     for ex in cfg.excludes:
         p = ex.strip("/")
@@ -520,11 +565,15 @@ def list_remote(cfg: Config, allow_missing: bool, ignored: Ignored):
         if size < 0:
             raise Fatal(f"云端文件大小未知: {rel}")
         files[rel] = size
+    if listing_path is not None and not cfg.dry_run:
+        write_listing_cache(listing_path, files)
     return files, True
 
 
-def ensure_remote(cfg: Config, ignored: Ignored):
-    files, exists = list_remote(cfg, allow_missing=True, ignored=ignored)
+def ensure_remote(cfg: Config, ignored: Ignored,
+                  listing_path: Path | None = None):
+    files, exists = list_remote(cfg, allow_missing=True, ignored=ignored,
+                                listing_path=listing_path)
     if exists:
         return files
     if cfg.dry_run:
@@ -536,7 +585,8 @@ def ensure_remote(cfg: Config, ignored: Ignored):
         raise Fatal(
             f"创建云端目录失败: {cfg.remote}\n{(p.stderr or p.stdout).strip()}"
         )
-    files, exists = list_remote(cfg, allow_missing=False, ignored=ignored)
+    files, exists = list_remote(cfg, allow_missing=False, ignored=ignored,
+                                listing_path=listing_path)
     if not exists:
         raise Fatal(f"创建后仍无法列出云端目录: {cfg.remote}")
     return files
@@ -839,7 +889,13 @@ def parse_args(argv):
     p.add_argument("--rclone", default=os.environ.get("RCLONE_BIN", "rclone"),
                    help="rclone 可执行文件")
     p.add_argument("--transfers", type=int, default=8, help="并发传输数（默认 8）")
-    p.add_argument("--checkers", type=int, default=16, help="并发检查数（默认 16）")
+    p.add_argument("--checkers", type=int, default=48,
+                   help="并发检查数（默认 48；云端目录多时越大越快，过高可能被限流）")
+    p.add_argument("--listing-cache", type=int, default=0, metavar="SECONDS",
+                   help="复用 SECONDS 秒内的云端列表缓存（0=关闭，推荐 300；"
+                        "缓存期间的新变化要等下次运行才会发现）")
+    p.add_argument("--refresh-listing", action="store_true",
+                   help="忽略云端列表缓存，强制重新读取")
     p.add_argument("--buffer-size", default="32M", help="每个传输的内存缓冲（默认 32M）")
     p.add_argument("--max-delete-pct", type=int, default=10,
                    help="单次最多删除云端文件的比例（默认 10%%）")
@@ -878,13 +934,15 @@ def main(argv=None) -> int:
         force=args.force,
         max_delete_pct=args.max_delete_pct,
         stats_interval=args.stats_interval,
+        listing_cache_ttl=args.listing_cache,
+        refresh_listing=args.refresh_listing,
     )
     if not shutil_which(cfg.rclone):
         raise Fatal(f"找不到 rclone: {cfg.rclone}")
     if not cfg.local.is_dir():
         raise Fatal(f"本地目录不存在或不是目录: {cfg.local}")
     ignored = collect_gitignored(cfg.local, cfg.gitignore)
-    state_path, lock_path, report_path, key = make_state_paths(cfg)
+    state_path, lock_path, report_path, key, listing_path = make_state_paths(cfg)
     lock_fd = acquire_lock(lock_path)
     report = []
     try:
@@ -934,7 +992,7 @@ def main(argv=None) -> int:
             )
 
         eprint("wpsdav-sync: 正在读取云端列表（文件多时可能需要几分钟）...")
-        remote_files = ensure_remote(cfg, ignored)
+        remote_files = ensure_remote(cfg, ignored, listing_path)
         eprint(f"wpsdav-sync: 云端 {len(remote_files)} 个文件，"
                f"{human_bytes(sum(remote_files.values()))}")
 
@@ -1115,6 +1173,15 @@ def main(argv=None) -> int:
             global_errors.extend(gerr)
 
         write_state(state_path, cfg, state)
+
+        # Uploads/deletes change the remote tree; drop the snapshot so the
+        # next run cannot plan against it.
+        if succeeded["upload"] or succeeded["delete"]:
+            try:
+                listing_path.unlink()
+            except OSError:
+                pass
+
         elapsed = time.monotonic() - t0
 
         eprint("")

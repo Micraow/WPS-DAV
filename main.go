@@ -302,16 +302,15 @@ func cmdServe(args []string) {
 	seedProvider(prov, client.Cookie())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 	st, err := ensureCredentials(ctx, cfg, prov, client)
 	if err != nil {
 		if errors.Is(err, auth.ErrManual) || errors.Is(err, auth.ErrNoCredentials) {
-			cancel()
 			if client.Cookie() == "" {
 				logging.Fatalf("no usable credentials: %v\n  run `wpsdav cookie` (manual) or `wpsdav login -provider buaa` (SSO)", err)
 			}
 			logging.Warnf("credentials check failed (%v); serving with the cached cookie until it expires", err)
 		} else {
-			cancel()
 			logging.Fatalf("authentication failed: %v", err)
 		}
 	} else {
@@ -326,11 +325,9 @@ func cmdServe(args []string) {
 			err = fmt.Errorf("business mode needs root_group_id")
 		}
 		if err != nil {
-			cancel()
 			logging.Fatalf("resolve root group: %v", err)
 		}
 	}
-	cancel()
 	logging.Infof("mode=%s root_group=%d company=%d auth=%s", cfg.Mode, rootID, client.CompanyID(), prov.Name())
 
 	tree := kvfs.NewTree(client, rootID, time.Duration(cfg.CacheTTLSeconds)*time.Second)

@@ -46,7 +46,7 @@ type Tree struct {
 	client   Lister
 	rootID   int64
 	ttl      time.Duration
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	dirs     map[string]*dirEntry
 	inflight map[string]*inflightCall
 	nowFunc  func() time.Time
@@ -90,11 +90,19 @@ func (t *Tree) Stat(ctx context.Context, p string) (*Node, error) {
 		if !cur.IsDir {
 			return nil, os.ErrNotExist
 		}
-		children, err := t.children(ctx, curPath, cur)
-		if err != nil {
+		if _, err := t.ensureChildren(ctx, curPath, cur); err != nil {
 			return nil, err
 		}
-		next, ok := children[part]
+		// Look up under the read lock: callers must not touch the map
+		// directly because writers mutate it in place.
+		t.mu.RLock()
+		de := t.dirs[curPath]
+		var next *Node
+		var ok bool
+		if de != nil {
+			next, ok = de.children[part]
+		}
+		t.mu.RUnlock()
 		if !ok {
 			return nil, os.ErrNotExist
 		}
@@ -104,8 +112,8 @@ func (t *Tree) Stat(ctx context.Context, p string) (*Node, error) {
 	return cur, nil
 }
 
-// List returns the children of a directory path.
-func (t *Tree) List(ctx context.Context, p string) (map[string]*Node, error) {
+// List returns a snapshot of the children of a directory path.
+func (t *Tree) List(ctx context.Context, p string) ([]*Node, error) {
 	p = clean(p)
 	n, err := t.Stat(ctx, p)
 	if err != nil {
@@ -114,15 +122,29 @@ func (t *Tree) List(ctx context.Context, p string) (map[string]*Node, error) {
 	if !n.IsDir {
 		return nil, os.ErrInvalid
 	}
-	return t.children(ctx, p, n)
+	if _, err := t.ensureChildren(ctx, p, n); err != nil {
+		return nil, err
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	de := t.dirs[p]
+	if de == nil {
+		return nil, nil
+	}
+	out := make([]*Node, 0, len(de.children))
+	for _, child := range de.children {
+		out = append(out, child)
+	}
+	return out, nil
 }
 
-// children returns the (possibly cached) listing of dir. Concurrent misses
+// ensureChildren makes sure dirPath is cached and returns the live map.
+// Callers must hold t.mu (read or write) to touch the map; concurrent misses
 // for the same directory are collapsed into one upstream request.
-func (t *Tree) children(ctx context.Context, dirPath string, dir *Node) (map[string]*Node, error) {
+func (t *Tree) ensureChildren(ctx context.Context, dirPath string, dir *Node) (map[string]*Node, error) {
 	t.mu.Lock()
 	if de, ok := t.dirs[dirPath]; ok && t.nowFunc().Before(de.expires) {
-		children := de.children // snapshot: never mutated in place
+		children := de.children
 		t.mu.Unlock()
 		return children, nil
 	}
@@ -182,24 +204,18 @@ func (t *Tree) children(ctx context.Context, dirPath string, dir *Node) (map[str
 
 // Seed inserts a node into a directory's cache directly. This hides the
 // eventual-consistency lag of the WPS children endpoint after writes.
-// Uses copy-on-write so readers holding a snapshot are never raced.
+// Writers mutate the map under the lock; readers only touch it under the
+// read lock (Stat) or through a List snapshot, so no copy-on-write is needed.
 func (t *Tree) Seed(dirPath string, n *Node) {
 	dirPath = clean(dirPath)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	de, ok := t.dirs[dirPath]
-	children := make(map[string]*Node)
-	expires := t.nowFunc().Add(2 * t.ttl)
-	if ok {
-		for k, v := range de.children {
-			children[k] = v
-		}
-		if de.expires.After(t.nowFunc()) {
-			expires = de.expires
-		}
+	if !ok || t.nowFunc().After(de.expires) {
+		de = &dirEntry{children: make(map[string]*Node), expires: t.nowFunc().Add(2 * t.ttl)}
+		t.dirs[dirPath] = de
 	}
-	children[n.Name] = n
-	t.dirs[dirPath] = &dirEntry{children: children, expires: expires}
+	de.children[n.Name] = n
 }
 
 // Forget drops the cached listing for dirPath (and any descendants).
@@ -229,13 +245,7 @@ func (t *Tree) Remove(dirPath, name string) {
 	if !ok {
 		return
 	}
-	children := make(map[string]*Node, len(de.children))
-	for k, v := range de.children {
-		if k != name {
-			children[k] = v
-		}
-	}
-	de.children = children
+	delete(de.children, name)
 }
 
 // ForcedRefresh clears all caches.

@@ -87,6 +87,9 @@ cd ~/src/project-b && wpsdav-sync --remote wps:code/project-b --gitignore
 | `--exclude-dir NAME` | 不同步的目录名，任意层级匹配，可重复。例如 `--exclude-dir node_modules --exclude-dir build` |
 | `--gitignore` | 跳过 Git 忽略的文件和目录；支持根目录不是仓库、以及子目录里的嵌套仓库 |
 | `--transfers N` | 并发传输数，默认 8；被 WPS 限流时降到 4 |
+| `--checkers N` | 并发检查/列目录数，默认 48；云端目录多时越大越快，过高可能被限流 |
+| `--listing-cache SECONDS` | 复用最近 SECONDS 秒内的云端列表快照（0=关闭）。缓存期间的新变化要等下次运行才会发现 |
+| `--refresh-listing` | 忽略列表缓存，强制重新读取云端列表 |
 | `--buffer-size SIZE` | 每个传输的内存缓冲，默认 32M |
 | `--max-delete-pct N` | 单次最多删除云端文件的比例，默认 10% |
 | `-v, --verbose` | 逐文件输出成功/失败详情；文件多时建议重定向到日志 |
@@ -165,6 +168,14 @@ cd ~/src/project-b && wpsdav-sync --remote wps:code/project-b --gitignore
   wpsdav 会先按 `upload_retries` 自行重试；仍失败时返回真实的 4xx/5xx，rclone 也会重试。
 - 云端列目录仍是主要开销；首次同步和每次增量都需要完整列一次云端。列目录失败会直接中止，
   不会把失败当成空目录。
+- **列目录基准**（4,078 个目录 / 44,072 个文件 / 26.7GB）：`--checkers 16` 约 99 秒，
+  `--checkers 48` 约 49 秒；继续提高到 64 没有明显收益。WPS 的目录接口每页固定 200 条，
+  也没有递归列举接口，所以每个目录至少一次请求，冷启动耗时的下限由目录数量决定。
+- **文件夹 mtime 不能用来判断变化**：实测新增、覆盖、删除子文件后，文件夹的
+  `getlastmodified` 始终等于创建时间；依赖它会漏同步。文件自身的 mtime 在上传时会更新，
+  但仍需先列目录才能看到，无法减少请求数。
+- **重复运行**：加 `--listing-cache 300` 可复用 5 分钟内的云端快照，命中时列表阶段
+  从几十秒降到几十毫秒；`--refresh-listing` 强制刷新。
 
 ## 已知限制
 

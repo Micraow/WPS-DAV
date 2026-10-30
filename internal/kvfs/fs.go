@@ -250,8 +250,13 @@ func (fs *FS) Copy(ctx context.Context, oldName, newName string, overwrite bool)
 		for attempt := 0; attempt < 4; attempt++ {
 			children, err := fs.Tree.List(ctx, dstParentPath)
 			if err == nil {
-				if n, ok := children[srcBase]; ok {
-					copied = n
+				for _, n := range children {
+					if n.Name == srcBase {
+						copied = n
+						break
+					}
+				}
+				if copied != nil {
 					break
 				}
 			}
@@ -431,11 +436,7 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(children))
-	for name := range children {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
 
 	if count <= 0 {
 		// "all entries": the first call returns the full slice (possibly
@@ -444,24 +445,24 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 			return nil, io.EOF
 		}
 		d.done = true
-		d.off = len(names)
-		out := make([]os.FileInfo, 0, len(names))
-		for _, name := range names {
-			out = append(out, nodeInfo{children[name]})
+		d.off = len(children)
+		out := make([]os.FileInfo, 0, len(children))
+		for _, child := range children {
+			out = append(out, nodeInfo{child})
 		}
 		return out, nil
 	}
 
-	if d.off >= len(names) {
+	if d.off >= len(children) {
 		return nil, io.EOF
 	}
-	end := len(names)
+	end := len(children)
 	if d.off+count < end {
 		end = d.off + count
 	}
 	out := make([]os.FileInfo, 0, end-d.off)
-	for _, name := range names[d.off:end] {
-		out = append(out, nodeInfo{children[name]})
+	for _, child := range children[d.off:end] {
+		out = append(out, nodeInfo{child})
 	}
 	d.off = end
 	return out, nil

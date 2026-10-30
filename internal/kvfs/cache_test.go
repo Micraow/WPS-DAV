@@ -41,7 +41,13 @@ func TestSeedRootVisibleToStat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List seeded dir: %v", err)
 	}
-	if got := children["a.txt"]; got == nil || got.ID != 7 {
+	var got *Node
+	for _, child := range children {
+		if child.Name == "a.txt" {
+			got = child
+		}
+	}
+	if got == nil || got.ID != 7 {
 		t.Fatalf("missing child: %+v", children)
 	}
 
