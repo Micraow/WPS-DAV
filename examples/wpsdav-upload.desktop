@@ -1,0 +1,26 @@
+# KDE 6: install to ~/.local/share/kio/servicemenus/
+# KDE 5: install to ~/.local/share/kservices5/ServiceMenus/
+# If wpsdav-upload is not in KDE's PATH, replace it below with an absolute path.
+[Desktop Entry]
+Type=Service
+Name=上传到 WPS 云盘
+Name[zh_CN]=上传到 WPS 云盘
+Icon=upload
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;inode/directory;
+X-KDE-Priority=TopLevel
+X-KDE-Submenu=上传到 WPS 云盘
+TryExec=wpsdav-upload
+Actions=uploadOverwrite;uploadTimestamp;
+
+[Desktop Action uploadOverwrite]
+Name=上传（同名文件直接覆盖）
+Name[zh_CN]=上传（同名文件直接覆盖）
+Icon=upload
+Exec=wpsdav-upload --mode overwrite -- %F
+
+[Desktop Action uploadTimestamp]
+Name=上传到新的日期文件夹（保留历史）
+Name[zh_CN]=上传到新的日期文件夹（保留历史）
+Icon=folder-new
+Exec=wpsdav-upload --mode timestamp -- %F

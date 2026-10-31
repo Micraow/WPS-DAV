@@ -172,6 +172,9 @@ rclone sync /本地目录 wpsdav:备份目录 --size-only --filter "- .*" --tran
 > 上面的 `rclone sync` 是单向镜像，会删除远端多余文件。如果需要“云端新增自动下载、
 > 云端删除保留本地、本地删除同步到云端”的非对称同步，可参考
 > [`examples/wpsdav-sync.py`](examples/wpsdav-sync.py)（[说明](examples/README.md)）。
+>
+> 需要右键上传选中的文件/文件夹，可参考
+> [`examples/wpsdav-upload.py`](examples/wpsdav-upload.py)（[说明](examples/wpsdav-upload.md)）。
 
 </details>
 
