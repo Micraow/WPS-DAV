@@ -13,8 +13,8 @@ Usage:
   wpsdav-sync.py --remote wps:backup/MyDocs --exclude cache --dry-run
   wpsdav-sync.py --local ~/Documents/MyDocs --remote wps:backup/MyDocs \
       --exclude-dir node_modules --exclude-dir build --gitignore
-  wpsdav-sync.py push --remote wps:backup/MyDocs   # 只上传本地变更，不扫描云端
-  wpsdav-sync.py push --delete --remote wps:backup/MyDocs
+  wpsdav-sync.py push --remote wps:backup/MyDocs   # 上传变更并删除云端已删文件
+  wpsdav-sync.py push --no-delete --remote wps:backup/MyDocs  # 只上传
 
 --local defaults to the current directory, and --remote chooses the cloud
 target, so the same command can be run from several directories (each
@@ -871,18 +871,21 @@ def write_report(path: Path, lines: list):
 def parse_args(argv):
     home = Path.home()
     p = argparse.ArgumentParser(
-        description="WPS/kDrive 非对称同步：sync 双向对齐，push 只上传本地变更",
+        description="WPS/kDrive 非对称同步：sync 双向对齐，push 只处理本地变更",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
                "  cd ~/Documents/MyDocs && wpsdav-sync.py --remote wps:backup/MyDocs --dry-run\n"
-               "  wpsdav-sync.py push --remote wps:backup/MyDocs   # 只上传本地变更，不扫描云端\n"
-               "  wpsdav-sync.py push --delete --remote wps:backup/MyDocs\n"
+               "  wpsdav-sync.py push --remote wps:backup/MyDocs   # 上传变更并删除云端已删文件\n"
+               "  wpsdav-sync.py push --no-delete --remote wps:backup/MyDocs  # 只上传\n"
                "  wpsdav-sync.py --local ~/src/proj --remote wps:code/proj "
                "--exclude-dir node_modules --gitignore")
     p.add_argument("verb", nargs="?", choices=("sync", "push"), default="sync",
-                   help="sync（默认，双向非对称）或 push（只上传本地变更，不读云端列表）")
-    p.add_argument("--delete", action="store_true", dest="push_delete",
-                   help="push 模式下同时删除本地已删除的云端文件")
+                   help="sync（默认，双向非对称）或 push（只处理本地变更："
+                        "上传变更并删除云端已删文件，不读云端列表）")
+    p.add_argument("--delete", action="store_true", dest="push_delete", default=None,
+                   help="push 默认会删除本地已删除的云端文件；此参数可显式开启")
+    p.add_argument("--no-delete", action="store_false", dest="push_delete",
+                   help="push 时只上传，不删除云端文件")
     p.add_argument("--local", default=".",
                    help="本地目录（默认当前目录）")
     p.add_argument("--remote", required=True,
@@ -957,7 +960,7 @@ def run_push(cfg: Config, state: dict, state_path: Path, report_path: Path,
     """只上传本地自上次记录以来新增/变更的文件，不读取云端列表。
 
     假设云端自上次成功同步后没有变化；push 不会发现云端新增/修改/删除。
-    加 --delete 时，按状态文件删除本地已经删掉的云端文件。
+    默认按状态文件删除本地已经删掉的云端文件；--no-delete 可关闭。
     """
     eprint("wpsdav-sync: push 模式：跳过云端列表，只处理本地变更")
 
@@ -1024,6 +1027,7 @@ def run_push(cfg: Config, state: dict, state_path: Path, report_path: Path,
     if uploads:
         listfile = state_path.parent / f"push-uploads-{key}.txt"
         listfile.write_text("".join(r + "\n" for r in uploads), encoding="utf-8")
+        # --no-check-dest copies regardless, so same-name files are overwritten.
         cmd = [cfg.rclone, "copy", str(cfg.local), cfg.remote,
                "--files-from-raw", str(listfile),
                "--no-check-dest", "--no-traverse",
@@ -1129,9 +1133,10 @@ def main(argv=None) -> int:
         listing_cache_ttl=args.listing_cache,
         refresh_listing=args.refresh_listing,
         verb=args.verb,
-        push_delete=args.push_delete,
+        push_delete=(args.push_delete if args.push_delete is not None
+                     else args.verb == "push"),
     )
-    if cfg.verb != "push" and cfg.push_delete:
+    if cfg.verb != "push" and args.push_delete:
         raise Fatal("--delete 只能和 push 一起使用")
     if not shutil_which(cfg.rclone):
         raise Fatal(f"找不到 rclone: {cfg.rclone}")

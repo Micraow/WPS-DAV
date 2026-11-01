@@ -76,17 +76,17 @@ cd ~/src/project-b && wpsdav-sync --remote wps:code/project-b --gitignore
 
 不同的 `(本地目录, 云端目录)` 组合使用各自的状态文件和锁，可以同时运行。
 同一个组合不能并发运行两个实例。
-### push：只上传本地变更（不扫描云端）
+### push：只处理本地变更（不扫描云端）
 
 当你确定云端自上次同步后没有变化时，用 `push` 跳过整个云端列表，只根据状态文件
-检查本地新增/修改的文件并上传：
+检查本地变更：新增/修改的文件上传，本地已删除的文件从云端删除。同名文件直接覆盖。
 
 ```bash
-# 只上传本地变更
+# 上传本地变更 + 删除本地已删除的云端文件（默认）
 wpsdav-sync push --remote wps:backup/MyDocs
 
-# 同时删除本地已经删掉的云端文件
-wpsdav-sync push --delete --remote wps:backup/MyDocs
+# 只上传，不删除云端
+wpsdav-sync push --no-delete --remote wps:backup/MyDocs
 
 # 先看计划
 wpsdav-sync push --remote wps:backup/MyDocs --dry-run
@@ -99,8 +99,9 @@ wpsdav-sync push --remote wps:backup/MyDocs --dry-run
 
 | 参数 | 说明 |
 |---|---|
-| `sync` / `push` | `sync`（默认）双向非对称同步；`push` 只上传本地变更，不读云端列表 |
-| `--delete` | 仅用于 `push`：同时删除本地已删除的云端文件 |
+| `sync` / `push` | `sync`（默认）双向非对称同步；`push` 只处理本地变更，不读云端列表 |
+| `--delete` | `push` 默认开启；用于显式开启（兼容写法） |
+| `--no-delete` | `push` 时只上传，不删除云端文件 |
 | `--local` | 本地目录，默认当前目录 |
 | `--remote` | 云端目标目录（rclone 远端路径），必填；例如 `wps:code/project-a` |
 | `--exclude PATH` | 不同步的相对路径前缀，可重复。例如 `cache` 会排除根目录下的整个 `cache/`；`private/secret.txt` 只排除这个文件 |
