@@ -13,6 +13,8 @@ Usage:
   wpsdav-sync.py --remote wps:backup/MyDocs --exclude cache --dry-run
   wpsdav-sync.py --local ~/Documents/MyDocs --remote wps:backup/MyDocs \
       --exclude-dir node_modules --exclude-dir build --gitignore
+  wpsdav-sync.py push --remote wps:backup/MyDocs   # 只上传本地变更，不扫描云端
+  wpsdav-sync.py push --delete --remote wps:backup/MyDocs
 
 --local defaults to the current directory, and --remote chooses the cloud
 target, so the same command can be run from several directories (each
@@ -119,6 +121,8 @@ class Config:
     stats_interval: str
     listing_cache_ttl: int
     refresh_listing: bool
+    verb: str
+    push_delete: bool
 
 
 @dataclass
@@ -867,12 +871,18 @@ def write_report(path: Path, lines: list):
 def parse_args(argv):
     home = Path.home()
     p = argparse.ArgumentParser(
-        description="WPS/kDrive 非对称同步：本地删除会删云端，云端删除不动本地",
+        description="WPS/kDrive 非对称同步：sync 双向对齐，push 只上传本地变更",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
                "  cd ~/Documents/MyDocs && wpsdav-sync.py --remote wps:backup/MyDocs --dry-run\n"
+               "  wpsdav-sync.py push --remote wps:backup/MyDocs   # 只上传本地变更，不扫描云端\n"
+               "  wpsdav-sync.py push --delete --remote wps:backup/MyDocs\n"
                "  wpsdav-sync.py --local ~/src/proj --remote wps:code/proj "
                "--exclude-dir node_modules --gitignore")
+    p.add_argument("verb", nargs="?", choices=("sync", "push"), default="sync",
+                   help="sync（默认，双向非对称）或 push（只上传本地变更，不读云端列表）")
+    p.add_argument("--delete", action="store_true", dest="push_delete",
+                   help="push 模式下同时删除本地已删除的云端文件")
     p.add_argument("--local", default=".",
                    help="本地目录（默认当前目录）")
     p.add_argument("--remote", required=True,
@@ -908,6 +918,188 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
+def scan_local_reported(cfg: Config, ignored: Ignored):
+    """扫描本地并打印摘要；sync 与 push 共用。"""
+    eprint("wpsdav-sync: 正在扫描本地...")
+    local_files, skipped, skip_prefixes, bad_examples, \
+        illegal_examples, empty_examples = scan_local(
+            cfg.local, cfg.excludes, set(cfg.exclude_dirs), ignored)
+    eprint(f"wpsdav-sync: 本地 {len(local_files)} 个文件，"
+           f"{human_bytes(sum(v[0] for v in local_files.values()))}"
+           f"；跳过 符号链接 {skipped['symlink']}、"
+           f"点项/临时项 {skipped['dot_or_temp']}、"
+           f"路径排除 {skipped['excluded_dir']}、"
+           f"目录名排除 {skipped['exclude_dir_name']}、"
+           f"VCS 忽略 {skipped['vcs_ignored']}、"
+           f"其他类型 {skipped['non_regular']}、"
+           f"非法文件名 {skipped['bad_name']}、"
+           f"WPS 不兼容文件名 {skipped['illegal_name']}、"
+           f"空文件 {skipped['empty']}")
+    for reason, rel in bad_examples:
+        eprint(f"  {reason}: {rel!r}")
+    if skipped["bad_name"] > len(bad_examples):
+        eprint(f"  其余 {skipped['bad_name'] - len(bad_examples)} 个未显示")
+    for reason, rel in illegal_examples:
+        eprint(f"  {reason}（改名后才会同步）: {rel}")
+    if skipped["illegal_name"] > len(illegal_examples):
+        eprint(f"  其余 {skipped['illegal_name'] - len(illegal_examples)} 个未显示")
+    for rel in empty_examples:
+        eprint(f"  空文件（WPS 无法存储，已跳过）: {rel}")
+    if skipped["empty"] > len(empty_examples):
+        eprint(f"  其余 {skipped['empty'] - len(empty_examples)} 个未显示")
+    return (local_files, skipped, skip_prefixes, bad_examples,
+            illegal_examples, empty_examples)
+
+
+def run_push(cfg: Config, state: dict, state_path: Path, report_path: Path,
+             key: str, local_files: dict, bad_examples: list,
+             illegal_examples: list, skipped: dict, t0: float) -> int:
+    """只上传本地自上次记录以来新增/变更的文件，不读取云端列表。
+
+    假设云端自上次成功同步后没有变化；push 不会发现云端新增/修改/删除。
+    加 --delete 时，按状态文件删除本地已经删掉的云端文件。
+    """
+    eprint("wpsdav-sync: push 模式：跳过云端列表，只处理本地变更")
+
+    candidates = []
+    for rel, sig in local_files.items():
+        ent = state.get(rel)
+        if ent is None or ent.get("l") != [sig[0], sig[1]]:
+            candidates.append(rel)
+
+    uploads = []
+    for rel in candidates:
+        full = cfg.local / rel
+        try:
+            st = os.lstat(full)
+        except OSError:
+            eprint(f"跳过上传（本地已消失）: {rel}")
+            continue
+        if not stat.S_ISREG(st.st_mode) or \
+                (st.st_size, st.st_mtime_ns) != local_files[rel]:
+            eprint(f"跳过上传（扫描后本地有变化，下次再传）: {rel}")
+            continue
+        uploads.append(rel)
+
+    deletes = []
+    if cfg.push_delete:
+        for rel, ent in state.items():
+            if ent.get("l") is None or rel in local_files:
+                continue
+            full = cfg.local / rel
+            if full.exists() or full.is_symlink():
+                continue
+            deletes.append(rel)
+
+    upload_bytes = sum(local_files[r][0] for r in uploads)
+    extra = f"，删除云端 {len(deletes)} 个" if cfg.push_delete else ""
+    eprint(f"计划: 上传 {len(uploads)} 个 ({human_bytes(upload_bytes)}){extra}")
+    if cfg.dry_run:
+        for rel in uploads[:5]:
+            eprint(f"  将上传: {rel}")
+        for rel in deletes[:5]:
+            eprint(f"  将删除云端: {rel}")
+        eprint("[试运行] 未上传、未删除、未写状态")
+        return 0
+    if not uploads and not deletes:
+        eprint("没有需要上传的变更")
+        return 0
+
+    if deletes and not cfg.force:
+        tracked = sum(1 for e in state.values() if e.get("r") is not None)
+        limit = max(100, tracked * cfg.max_delete_pct // 100)
+        if len(deletes) > limit:
+            raise Fatal(
+                f"本次计划删除云端 {len(deletes)} 个文件，超过安全阈值 "
+                f"{limit}。确认无误后加 --force 重跑"
+            )
+
+    def flush():
+        write_state(state_path, cfg, state)
+
+    failures = {}
+    global_errors = []
+    succeeded = {"upload": set(), "delete": set()}
+
+    if uploads:
+        listfile = state_path.parent / f"push-uploads-{key}.txt"
+        listfile.write_text("".join(r + "\n" for r in uploads), encoding="utf-8")
+        cmd = [cfg.rclone, "copy", str(cfg.local), cfg.remote,
+               "--files-from-raw", str(listfile),
+               "--no-check-dest", "--no-traverse",
+               "--no-update-dir-modtime",
+               "--transfers", str(cfg.transfers),
+               "--checkers", str(cfg.checkers),
+               "--buffer-size", cfg.buffer_size]
+
+        def on_up(rel):
+            lsig = local_files[rel]
+            state[rel] = {"l": [lsig[0], lsig[1]], "r": lsig[0]}
+
+        ok, fail, rc, gerr = run_phase(
+            cfg, "上传", cmd, set(uploads), on_up, flush,
+            total_files=len(uploads),
+            total_bytes=upload_bytes,
+            size_of=lambda rel: local_files[rel][0])
+        succeeded["upload"] = ok
+        failures.update(fail)
+        global_errors.extend(gerr)
+
+    if deletes:
+        listfile = state_path.parent / f"push-deletes-{key}.txt"
+        listfile.write_text("".join(r + "\n" for r in deletes), encoding="utf-8")
+        cmd = [cfg.rclone, "delete", cfg.remote,
+               "--files-from-raw", str(listfile),
+               "--no-traverse",
+               "--checkers", str(cfg.checkers)]
+
+        def on_del(rel):
+            state.pop(rel, None)
+
+        ok, fail, rc, gerr = run_phase(
+            cfg, "删除云端", cmd, set(deletes), on_del, flush,
+            not_found_ok=True, total_files=len(deletes), mode="delete")
+        succeeded["delete"] = ok
+        failures.update(fail)
+        global_errors.extend(gerr)
+
+    write_state(state_path, cfg, state)
+    elapsed = time.monotonic() - t0
+    eprint("")
+    eprint(f"完成，用时 {human_eta(elapsed)}")
+    eprint(f"  上传: 成功 {len(succeeded['upload'])}/{len(uploads)}")
+    if cfg.push_delete:
+        eprint(f"  删除云端: 成功 {len(succeeded['delete'])}/{len(deletes)}")
+    if failures:
+        eprint(f"  失败: {len(failures)}（详见 {report_path}）")
+    if global_errors:
+        eprint(f"  全局错误: {len(global_errors)}（详见 {report_path}）")
+
+    report = [
+        f"wpsdav-sync report {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "mode=push",
+        f"local={cfg.local}",
+        f"remote={cfg.remote}",
+        f"dry_run={cfg.dry_run}",
+        f"upload={len(succeeded['upload'])}/{len(uploads)}",
+        f"delete={len(succeeded['delete'])}/{len(deletes)}",
+        f"skipped_bad_names={skipped['bad_name']}",
+        f"skipped_wps_illegal_names={skipped['illegal_name']}",
+        f"skipped_empty_files={skipped['empty']}",
+        "",
+        "## skipped_bad_names",
+    ]
+    report.extend(f"{reason}\t{rel!r}" for reason, rel in bad_examples)
+    report += ["", "## skipped_wps_illegal_names"]
+    report.extend(f"{reason}\t{rel}" for reason, rel in illegal_examples)
+    report += ["", "## failures"]
+    report.extend(f"{rel}\t{err}" for rel, err in sorted(failures.items()))
+    report += ["", "## global_errors"]
+    report.extend(f"{obj or '-'}\t{err}" for obj, err in global_errors)
+    write_report(report_path, report)
+    return 2 if failures else 0
+
+
 def main(argv=None) -> int:
     args = parse_args(argv or sys.argv[1:])
     exclude_dirs = []
@@ -936,7 +1128,11 @@ def main(argv=None) -> int:
         stats_interval=args.stats_interval,
         listing_cache_ttl=args.listing_cache,
         refresh_listing=args.refresh_listing,
+        verb=args.verb,
+        push_delete=args.push_delete,
     )
+    if cfg.verb != "push" and cfg.push_delete:
+        raise Fatal("--delete 只能和 push 一起使用")
     if not shutil_which(cfg.rclone):
         raise Fatal(f"找不到 rclone: {cfg.rclone}")
     if not cfg.local.is_dir():
@@ -957,39 +1153,19 @@ def main(argv=None) -> int:
             eprint("wpsdav-sync: 首次运行，没有历史状态")
 
         t0 = time.monotonic()
-        eprint("wpsdav-sync: 正在扫描本地...")
         local_files, skipped, skip_prefixes, bad_examples, \
-            illegal_examples, empty_examples = scan_local(
-                cfg.local, cfg.excludes, set(cfg.exclude_dirs), ignored)
-        eprint(f"wpsdav-sync: 本地 {len(local_files)} 个文件，"
-               f"{human_bytes(sum(v[0] for v in local_files.values()))}"
-               f"；跳过 符号链接 {skipped['symlink']}、"
-               f"点项/临时项 {skipped['dot_or_temp']}、"
-               f"路径排除 {skipped['excluded_dir']}、"
-               f"目录名排除 {skipped['exclude_dir_name']}、"
-               f"VCS 忽略 {skipped['vcs_ignored']}、"
-               f"其他类型 {skipped['non_regular']}、"
-               f"非法文件名 {skipped['bad_name']}、"
-               f"WPS 不兼容文件名 {skipped['illegal_name']}、"
-               f"空文件 {skipped['empty']}")
-        for reason, rel in bad_examples:
-            eprint(f"  {reason}: {rel!r}")
-        if skipped["bad_name"] > len(bad_examples):
-            eprint(f"  其余 {skipped['bad_name'] - len(bad_examples)} 个未显示")
-        for reason, rel in illegal_examples:
-            eprint(f"  {reason}（改名后才会同步）: {rel}")
-        if skipped["illegal_name"] > len(illegal_examples):
-            eprint(f"  其余 {skipped['illegal_name'] - len(illegal_examples)} 个未显示")
-        for rel in empty_examples:
-            eprint(f"  空文件（WPS 无法存储，已跳过）: {rel}")
-        if skipped["empty"] > len(empty_examples):
-            eprint(f"  其余 {skipped['empty'] - len(empty_examples)} 个未显示")
+            illegal_examples, empty_examples = scan_local_reported(cfg, ignored)
         if (not local_files and not cfg.force
+                and (cfg.verb == "sync" or cfg.push_delete)
                 and any(e.get("l") is not None for e in state.values())):
             raise Fatal(
                 "本地一个文件都没扫描到，但历史状态显示曾有文件。"
                 "为防误删云端，已中止；确认本地确实清空后加 --force 重跑"
             )
+        if cfg.verb == "push":
+            return run_push(cfg, state, state_path, report_path, key,
+                            local_files, bad_examples,
+                            illegal_examples, skipped, t0)
 
         eprint("wpsdav-sync: 正在读取云端列表（文件多时可能需要几分钟）...")
         remote_files = ensure_remote(cfg, ignored, listing_path)
